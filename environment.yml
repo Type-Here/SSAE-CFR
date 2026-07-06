@@ -1,0 +1,18 @@
+name: ssae-cfr
+# Conda/mamba environment for SSAE-CFR local development.
+# Torch is the CPU build here — the heavy LLM embedding step (prior/embeddings.py)
+# runs on the university machine, not locally (see Implementation_plan.md §4.1).
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - numpy
+  - pandas
+  - pyarrow          # parquet I/O for the MIMIC / ACTG175 datasets
+  - scipy
+  - scikit-learn
+  - pyyaml           # per-dataset hyperparameter YAML (ssae_cfr/config/)
+  - matplotlib       # training/diagnostic plots (energy curve, retention, losses)
+  - pytorch          # CPU build; GPU not needed to train the AE on IHDP/ACTG175
+  - pytest
+  - pip
