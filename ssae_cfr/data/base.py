@@ -12,7 +12,7 @@ Design notes
   treatment, the outcome, which columns to drop, where the oracle `mu0`/`mu1`
   live) come from `config.py` at the repo root (`BaselineConfig`).
 - Adapters read those roles and pass them into :meth:`Dataset.from_frame`;
-  the covariate set follows the vendored convention `X = all columns − drop_cols`.
+  the covariate set follows the vendored convention `X = all columns - drop_cols`.
 - Standardization is deliberately *not* done here.
   `x` is required to be standardized before the `P_U` projection,
   because `P_U` lives in `R^m` with one axis per covariate and the projection
@@ -125,21 +125,21 @@ class Dataset:
 
     @property
     def m(self) -> int:
-        """Number of covariates (the dimension ``P_U`` and the SSAE act in)."""
+        """Number of covariates (the dimension `P_U` and the SSAE act in)."""
         return self.x.shape[1]
 
     @property
     def has_oracle(self) -> bool:
-        """True when true counterfactuals (``mu0``/``mu1``) are available."""
+        """True when true counterfactuals (`mu0`/`mu1`) are available."""
         return self.mu0 is not None
 
     @property
     def tau_true(self) -> Optional[np.ndarray]:
-        """Oracle ITE ``mu1 - mu0`` when known, else ``None``.
+        """Oracle ITE `mu1 - mu0` when known, else `None`.
 
         For the ACTG175 pseudo-obs sharp null this is identically zero (the bias
         tool relabels treatment without regenerating Y), which is what makes
-        PEHE-against-zero valid there — see Implementation_plan §2.
+        PEHE-against-zero valid there.
         """
         if not self.has_oracle:
             return None
@@ -168,7 +168,7 @@ class Dataset:
         here. The covariate set follows the vendored convention:
 
             X = feature_cols  if given, else
-            X = all columns − drop_cols − {treatment, outcome, mu0, mu1}.
+            X = all columns - drop_cols - {treatment, outcome, mu0, mu1}.
 
         Note that the "drop_cols" lists in "config.py" already include ids,
         timestamps, the treatment and outcome, and known leakage columns, so the
