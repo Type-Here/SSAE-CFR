@@ -224,9 +224,10 @@ internal_docs/
 # ======================================================================
 # SSAE-CFR project-specific ignores
 # ======================================================================
-# Datasets: size + licensing (MIMIC needs PhysioNet creds — never commit).
-data/
-# Vendored read-only code from CATE-LLaM (see internal_docs/vendored.md).
+# Datasets: size + licensing (MIMIC needs PhysioNet creds, never commit).
+/data/
+
+# Vendored read-only code from CATE-LLaM.
 tools/vendored/
 # Model checkpoints.
 *.ckpt
@@ -235,10 +236,6 @@ tools/vendored/
 # (the negation itself lives in artifacts/.gitignore, which takes precedence).
 artifacts/*
 !artifacts/manifest.json
-# Any root-level markdown stays local (this keeps CLAUDE.md out of git without
-# naming it); the public README is the only tracked root .md.
+
 /*.md
 !/README.md
-
-# config.py (repo root) is intentionally NOT ignored — it is small, trimmed, and
-# the canonical per-dataset column map; keep it versioned.
