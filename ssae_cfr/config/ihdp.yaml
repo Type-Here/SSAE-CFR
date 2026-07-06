@@ -1,0 +1,11 @@
+# IHDP hyperparameters overrides on top of TrainConfig defaults.
+# IHDP: m=25, ~747 obs, continuous outcome, oracle mu0/mu1 (PEHE ground truth).
+# Only fields that differ from the defaults need to appear here.
+dataset: ihdp
+k_latent: 32
+# Full-batch: IHDP is small, so per-batch SMD is stable.
+batch_size: null
+epochs: 300
+# k_svd left as auto (choose_k_svd at 90% energy); no protected covariates set
+# for the semi-synthetic benchmark.
+energy_threshold: 0.90
