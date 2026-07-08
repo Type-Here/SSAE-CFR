@@ -25,9 +25,13 @@ patients, so it is computed once and cached per dataset.
 
 from __future__ import annotations
 
-from typing import Optional, Sequence
+import json
+from pathlib import Path
+from typing import Any, Mapping, Optional, Sequence, Tuple, Union
 
 import numpy as np
+
+PathLike = Union[str, Path]
 
 
 def svd_energy(V: np.ndarray) -> np.ndarray:
@@ -119,3 +123,27 @@ def retention(P_U: np.ndarray) -> np.ndarray:
     subspace, near 0 means it is pushed almost entirely into the residual.
     """
     return np.diag(np.asarray(P_U, dtype=np.float64)).copy()
+
+
+def save_projector(P_U: np.ndarray, path: PathLike, meta: Mapping[str, Any]) -> Path:
+    """Persist `P_U` (.npz) plus a sidecar .json holding the meta needed to trust it.
+
+    The sidecar records at least the covariate order (`feature_names`) that `P_U` was
+    built against, so training can assert the projector matches the dataset it is applied
+    to. It is the per-artifact companion to the versioned `artifacts/manifest.json`.
+    """
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    np.savez_compressed(path, P_U=np.asarray(P_U, dtype=np.float64))
+    path.with_suffix(".json").write_text(json.dumps(dict(meta), indent=2), encoding="utf-8")
+    return path
+
+
+def load_projector(path: PathLike) -> Tuple[np.ndarray, dict]:
+    """Load `(P_U, meta)` written by `save_projector`. Missing sidecar -> empty meta."""
+    path = Path(path)
+    with np.load(path) as data:
+        P_U = data["P_U"]
+    sidecar = path.with_suffix(".json")
+    meta = json.loads(sidecar.read_text(encoding="utf-8")) if sidecar.exists() else {}
+    return P_U, meta
