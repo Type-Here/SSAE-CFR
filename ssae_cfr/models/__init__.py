@@ -5,6 +5,17 @@ subclass `torch.nn.Module`. Exports grow as each component is implemented (Miles
 5-7); the encoder/decoder land first.
 """
 
+from .heads import OutcomeHeads
+from .pgag import PGAG, PGAGOutput
 from .ssae import Decoder, Encoder, build_mlp
+from .ssae_cfr import SSAECFR
 
-__all__ = ["Encoder", "Decoder", "build_mlp"]
+__all__ = [
+    "Encoder",
+    "Decoder",
+    "build_mlp",
+    "OutcomeHeads",
+    "PGAG",
+    "PGAGOutput",
+    "SSAECFR",
+]

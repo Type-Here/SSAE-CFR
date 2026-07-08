@@ -5,13 +5,26 @@ the fixed analytic projector P_U = U_k U_k^T (Variant A, feature space). Both ou
 are cached per dataset in `artifacts/`.
 """
 
+from .descriptions import (
+    descriptions_for,
+    emit_gloss_template,
+    load_glosses,
+    missing_glosses,
+)
 from .embeddings import (
     build_embeddings,
     cache_embeddings,
     load_embeddings,
     placeholder_embeddings,
 )
-from .projector import build_projector, choose_k_svd, retention, svd_energy
+from .projector import (
+    build_projector,
+    choose_k_svd,
+    load_projector,
+    retention,
+    save_projector,
+    svd_energy,
+)
 
 __all__ = [
     "build_embeddings",
@@ -22,4 +35,10 @@ __all__ = [
     "choose_k_svd",
     "retention",
     "svd_energy",
+    "load_projector",
+    "save_projector",
+    "descriptions_for",
+    "emit_gloss_template",
+    "load_glosses",
+    "missing_glosses",
 ]
