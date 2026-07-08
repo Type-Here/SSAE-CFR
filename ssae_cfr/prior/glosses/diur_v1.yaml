@@ -1,0 +1,39 @@
+# diur_v1 covariate glosses (MIMIC ICU diuretic cohort).
+# feature_name -> short human-readable gloss slotted into the prompt template.
+# Order matches the dataset's feature_names; do not reorder. Standard ICU
+# abbreviations are expanded to their full clinical terms so the embedding model
+# reads a concept rather than a token. Review before an embedding run.
+age: patient age
+weight_kg: body weight in kilograms
+height_cm: body height in centimeters
+bmi: body mass index
+hr: heart rate
+rr: respiratory rate
+spo2: peripheral oxygen saturation
+temp_c: body temperature in degrees Celsius
+sbp: systolic blood pressure
+map: mean arterial pressure
+creatinine: serum creatinine
+bun: blood urea nitrogen
+sodium: serum sodium
+potassium: serum potassium
+chloride: serum chloride
+bicarbonate: serum bicarbonate
+inr: international normalized ratio
+ptt: partial thromboplastin time
+ph: arterial blood pH
+po2: partial pressure of oxygen
+pco2: partial pressure of carbon dioxide
+fio2: fraction of inspired oxygen
+gcs: Glasgow Coma Scale score
+uo_mlkghr_6hr: urine output in milliliters per kilogram per hour over six hours
+urineoutput_6hr: total urine output over six hours
+vent_active_at_t0: mechanical ventilation active at baseline
+vaso_any_baseline: any vasopressor use at baseline
+vaso_max_rate_baseline: maximum vasopressor infusion rate at baseline
+has_creatinine: whether serum creatinine was measured
+has_uo_mlkghr_6hr: whether urine output was measured
+has_fio2: whether fraction of inspired oxygen was recorded
+has_lactate: whether serum lactate was measured
+has_gcs: whether the Glasgow Coma Scale was assessed
+gender_M: male sex indicator
