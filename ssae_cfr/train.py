@@ -158,7 +158,12 @@ def main(argv: Optional[List[str]] = None) -> None:
         P_U = build_projector_for(dataset, cfg)
         print("using PLACEHOLDER P_U (no real embeddings yet) - results are not meaningful")
 
-    model = SSAECFR(m=dataset.m, P_U=torch.as_tensor(P_U, dtype=torch.float32), cfg=cfg)
+    model = SSAECFR(
+        m=dataset.m,
+        P_U=torch.as_tensor(P_U, dtype=torch.float32),
+        cfg=cfg,
+        outcome_type=dataset.outcome_type,
+    )
     print(f"IHDP: n={dataset.n} m={dataset.m} | P_U rank={int(round(float(np.trace(P_U))))}")
     fit(model, dataset, cfg)
 

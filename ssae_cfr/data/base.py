@@ -145,6 +145,27 @@ class Dataset:
             return None
         return self.mu1 - self.mu0
 
+    def subset(self, idx: np.ndarray) -> "Dataset":
+        """A new :class:`Dataset` holding only the rows in `idx`.
+
+        Used by the train/test split. Everything row-shaped (`x`, `t`, `yf`, and the
+        oracle `mu0`/`mu1` when present) is indexed; the metadata (`name`,
+        `feature_names`, `outcome_type`, `standardized`) carries over untouched, so a
+        split keeps pointing at the same covariate order the prior `P_U` was built for.
+        """
+        idx = np.asarray(idx)
+        return Dataset(
+            name=self.name,
+            x=self.x[idx],
+            t=self.t[idx],
+            yf=self.yf[idx],
+            feature_names=list(self.feature_names),
+            mu0=None if self.mu0 is None else self.mu0[idx],
+            mu1=None if self.mu1 is None else self.mu1[idx],
+            outcome_type=self.outcome_type,
+            standardized=self.standardized,
+        )
+
     # -- construction ------------------------------------------------------
 
     @classmethod
