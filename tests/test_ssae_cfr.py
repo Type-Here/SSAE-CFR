@@ -21,13 +21,14 @@ from ssae_cfr.utils.standardize import standardize_dataset
 M = 12
 
 
-def _model(cfg=None):
+def _model(cfg=None, **kwargs):
     cfg = cfg or load_config(None, k_latent=8, encoder_hidden=(16,), decoder_hidden=(16,),
                              head_hidden=(8,), gating_hidden=(8,))
     torch.manual_seed(0)
     V = placeholder_embeddings(M, d_LLM=32, seed=0)
     P_U = build_projector(V, choose_k_svd(V))
-    return SSAECFR(m=M, P_U=torch.as_tensor(P_U, dtype=torch.float32), cfg=cfg), cfg
+    model = SSAECFR(m=M, P_U=torch.as_tensor(P_U, dtype=torch.float32), cfg=cfg, **kwargs)
+    return model, cfg
 
 
 def _batch(n=64, seed=0):
@@ -104,6 +105,57 @@ def test_predict_tau_is_deterministic():
     tau2 = model.predict_tau(x)
     assert tau1.shape == (64,)
     assert torch.allclose(tau1, tau2)
+
+
+def test_outcome_standardization_round_trips():
+    """A prediction must come back in the units the caller supplied data in."""
+    model, _ = _model(y_loc=3.5, y_scale=7.25)
+    x, _, _ = _batch()
+    raw = model(x, torch.zeros(64), omega=0.0)
+    y0, y1 = model.potential_outcomes(x)
+    assert torch.allclose(y0, raw["y0_hat"] * 7.25 + 3.5, atol=1e-5)
+    assert torch.allclose(y1, raw["y1_hat"] * 7.25 + 3.5, atol=1e-5)
+    # tau is a difference, so the offset cancels and only the scale survives
+    assert torch.allclose(
+        model.predict_tau(x), (raw["y1_hat"] - raw["y0_hat"]) * 7.25, atol=1e-5
+    )
+
+
+def test_outcome_affine_is_state_not_a_constructor_argument():
+    """loc/scale are buffers, so they move with the model and survive a save/load."""
+    model, _ = _model(y_loc=3.5, y_scale=7.25)
+    assert model.outcome_affine == (3.5, 7.25)
+    fresh, _ = _model()
+    fresh.load_state_dict(model.state_dict())
+    assert fresh.outcome_affine == (3.5, 7.25)
+
+
+def test_loss_standardizes_the_target_to_meet_the_heads():
+    """L_fact must be computed against the standardized outcome, not the raw one.
+
+    Otherwise L_fact alone is on the outcome's units while L_mmd, L_rec and L_align are
+    on the standardized covariate scale, and alpha_mmd silently means a different thing
+    on every dataset - the bug this standardization exists to remove.
+    """
+    x, t, yf = _batch()
+    loc, scale = 3.5, 7.25
+    plain, _ = _model()
+    scaled, _ = _model(y_loc=loc, y_scale=scale)
+    scaled.load_state_dict(plain.state_dict() | {
+        "y_loc": torch.tensor(loc), "y_scale": torch.tensor(scale)
+    })
+    # identical weights, so feeding the raw outcome to the standardizing model must
+    # match feeding the already-standardized outcome to the plain one
+    on_raw = scaled.loss_terms(scaled(x, t, 0.0), x, t, yf * scale + loc, "continuous")
+    on_std = plain.loss_terms(plain(x, t, 0.0), x, t, yf, "continuous")
+    assert torch.allclose(on_raw["L_fact"], on_std["L_fact"], atol=1e-4)
+
+
+def test_binary_outcome_refuses_a_scale():
+    """A probability is already on its own scale; asking to standardize it is a bug."""
+    import pytest
+    with pytest.raises(ValueError, match="never standardized"):
+        _model(outcome_type="binary", y_scale=2.0)
 
 
 def test_fit_drives_loss_down_on_synthetic():

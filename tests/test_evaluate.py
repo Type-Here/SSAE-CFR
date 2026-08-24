@@ -78,6 +78,37 @@ def test_continuous_outcomes_pass_through_untouched():
     assert y1 == pytest.approx([2.5, -1.0])
 
 
+def test_continuous_outcomes_are_put_back_on_the_callers_scale():
+    """A head trained against a standardized outcome emits nobody's units until undone."""
+    out = {"y0_hat": np.array([1.5, -3.0]), "y1_hat": np.array([2.5, -1.0])}
+    y0, y1 = _potential_outcomes(out, "continuous", 3.5, 2.0)
+    assert y0 == pytest.approx([6.5, -2.5])
+    assert y1 == pytest.approx([8.5, 1.5])
+
+
+def test_the_outcome_scale_is_fit_on_the_training_split_only():
+    """Like the covariate standardizer: a property of the data the model was shown.
+
+    Reading it off the test split would leak the held-out outcome's location and spread
+    into the predictions scored against it.
+    """
+    from ssae_cfr.evaluate import fit_and_score
+
+    train, test = _dataset(n=100), _dataset(n=40)
+    # move the test outcome far away; the fitted scale must not follow it
+    test = Dataset(
+        name=test.name, x=test.x, t=test.t, yf=test.yf * 10.0 + 50.0,
+        feature_names=test.feature_names, mu0=test.mu0, mu1=test.mu1,
+        outcome_type=test.outcome_type, standardized=True,
+    )
+    cfg = load_config(None, k_latent=4, encoder_hidden=(8,), decoder_hidden=(8,),
+                      head_hidden=(4,), gating_hidden=(4,), epochs=2)
+    model, _ = fit_and_score(train, test, cfg)
+    loc, scale = model.outcome_affine
+    assert loc == pytest.approx(float(np.mean(train.yf)))
+    assert scale == pytest.approx(float(np.std(train.yf)))
+
+
 # -- sensitivity -----------------------------------------------------------
 
 
