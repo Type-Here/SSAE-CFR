@@ -28,7 +28,13 @@ from typing import List, Optional, Sequence
 import numpy as np
 
 from ..data.roles import repo_root
-from .descriptions import descriptions_for, emit_gloss_template, load_glosses, missing_glosses, PROMPT_TEMPLATE
+from .descriptions import (
+    descriptions_for,
+    emit_gloss_template,
+    load_glosses,
+    load_prompt_template,
+    missing_glosses,
+)
 from .embeddings import build_embeddings, cache_embeddings, placeholder_embeddings
 from .projector import build_projector, choose_k_svd, retention, save_projector, svd_energy
 
@@ -107,19 +113,24 @@ def build(
     placeholder: bool = False,
     d_llm: int = 64,
     seed: int = 0,
+    dtype: str = "auto",
+    batch_size: int = 8,
 ) -> None:
     gpath = glosses_path(dataset)
     if not gpath.exists():
         raise SystemExit(f"no gloss file at {gpath}; run `emit --dataset {dataset}` first")
 
     glosses = load_glosses(gpath)
+    template = load_prompt_template(gpath)
     feature_names = list(glosses.keys())
     m = len(feature_names)
-    prompts = descriptions_for(feature_names, glosses)
+    prompts = descriptions_for(feature_names, glosses, template)
 
     blank = missing_glosses(feature_names, glosses)
     if blank:
         print(f"WARNING: {len(blank)} covariates have no gloss (using prettified names): {blank}")
+    print(f"prompt template: {template}")
+    print(f"example prompt : {prompts[0]}")
 
     out = artifacts_dir(dataset)
     if placeholder:
@@ -127,8 +138,8 @@ def build(
         V = placeholder_embeddings(m, d_LLM=d_llm, seed=seed)
         model_used = f"placeholder(seed={seed})"
     else:
-        print(f"embedding {m} covariate prompts with {model} ...")
-        V = build_embeddings(prompts, model_name=model)
+        print(f"embedding {m} covariate prompts with {model} (dtype={dtype}) ...")
+        V = build_embeddings(prompts, model_name=model, dtype=dtype, batch_size=batch_size)
         model_used = model
     cache_embeddings(V, out / "V.npz", model_name=model_used, feature_names=feature_names)
 
@@ -144,7 +155,7 @@ def build(
     meta = {
         "dataset": dataset,
         "model_name": model_used,
-        "prompt_template": PROMPT_TEMPLATE,
+        "prompt_template": template,
         "glosses": str(gpath.relative_to(repo_root())),
         "d_LLM": int(V.shape[1]),
         "m": m,
@@ -154,6 +165,7 @@ def build(
         "protected": list(protected),
         "feature_names": feature_names,
         "V_sha256": _sha256(V),
+        "dtype": dtype,
         "placeholder": placeholder,
         "created": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     }
@@ -183,6 +195,13 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     pb.add_argument("--placeholder", action="store_true", help="dry run: random V, no LLM")
     pb.add_argument("--d-llm", type=int, default=64, help="placeholder V width")
     pb.add_argument("--seed", type=int, default=0)
+    pb.add_argument(
+        "--dtype",
+        default="auto",
+        choices=("auto", "float16", "bfloat16", "float32"),
+        help="model precision; auto = float16 on GPU, float32 on CPU",
+    )
+    pb.add_argument("--batch-size", type=int, default=8, help="prompts per forward pass")
 
     args = parser.parse_args(argv)
     if args.cmd == "emit":
@@ -193,7 +212,8 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             dataset=args.dataset, model=args.model, k_svd=args.k_svd,
             energy_threshold=args.energy, protected=protected,
             retention_floor=args.retention_floor, placeholder=args.placeholder,
-            d_llm=args.d_llm, seed=args.seed,
+            d_llm=args.d_llm, seed=args.seed, dtype=args.dtype,
+            batch_size=args.batch_size,
         )
 
 
