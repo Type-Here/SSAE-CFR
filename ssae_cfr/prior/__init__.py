@@ -9,6 +9,7 @@ from .descriptions import (
     descriptions_for,
     emit_gloss_template,
     load_glosses,
+    load_prompt_template,
     missing_glosses,
 )
 from .embeddings import (
@@ -40,5 +41,6 @@ __all__ = [
     "descriptions_for",
     "emit_gloss_template",
     "load_glosses",
+    "load_prompt_template",
     "missing_glosses",
 ]
