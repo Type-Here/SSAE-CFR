@@ -44,6 +44,7 @@ are meant to guard against.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
@@ -56,6 +57,11 @@ from ..utils.split import train_val_test_indices
 from ..utils.standardize import standardize_dataset
 
 DEFAULT_VAL_FRACTION = 0.3  # of the 672 training units => 63/27/10 of the whole
+
+# The per-dataset YAML is the benchmark's config, so it loads by default. Passing
+# --config None-by-accident used to fall back to the bare dataclass defaults, which
+# silently ignored anything set in the YAML.
+DEFAULT_CONFIG = Path(__file__).resolve().parents[1] / "config" / "ihdp.yaml"
 
 # Published results under this protocol, for orientation while reading our own output.
 # Shalit, Johansson and Sontag (2017), "Estimating individual treatment effect:
@@ -70,6 +76,18 @@ REFERENCE_RESULTS: Dict[str, Dict[str, float]] = {
     "CFR Wass": {"pehe_in": 0.71, "pehe_out": 0.76, "eps_ate_in": 0.25, "eps_ate_out": 0.27},
 }
 REFERENCE_SOURCE = "Shalit et al. 2017, Table 1 (1000 realizations, 63/27/10)"
+
+# Printed under the reference rows so the table is never mistaken for a like-for-like
+# comparison. The published numbers come from 1000 realizations of tuned models in
+# another codebase; ours from however many were asked for, untuned. PEHE across
+# realizations is heavy-tailed (Curth et al.), so an unpaired difference of means
+# between codebases is decided largely by which realizations each side happened to
+# draw. The band orients a run. It does not support a claim.
+REFERENCE_CAVEAT = (
+    "  ^ orientation only, not a like-for-like comparison: 1000 tuned realizations in\n"
+    "    another codebase vs ours, untuned. PEHE is heavy-tailed across realizations,\n"
+    "    so unpaired cross-codebase means do not support a claim."
+)
 
 
 def _standardized_splits(
@@ -172,6 +190,9 @@ def format_benchmark(summary: Dict[str, Dict[str, float]], n_realizations: int) 
         sem = stat["std"] / np.sqrt(stat["n_runs"]) if stat["n_runs"] > 1 else 0.0
         return f"{stat['mean']:.2f} +- {sem:.2f}"
 
+    # One row, the mean, in the outcome's own units - the same statistic the published
+    # rows below report, so the table can be read straight down. The median of each
+    # metric is in the summary dict and the --json-out file for anyone who wants it.
     lines.append(
         f"{'SSAE-CFR':<12}{cell('pool_pehe'):>16}{cell('out_pehe'):>16}"
         f"{cell('pool_eps_ate'):>15}{cell('out_eps_ate'):>15}"
@@ -183,12 +204,14 @@ def format_benchmark(summary: Dict[str, Dict[str, float]], n_realizations: int) 
             f"{name:<12}{ref['pehe_in']:>16.2f}{ref['pehe_out']:>16.2f}"
             f"{ref['eps_ate_in']:>15.2f}{ref['eps_ate_out']:>15.2f}"
         )
+    lines.append(REFERENCE_CAVEAT)
 
     lines.append("-" * 74)
     for key, label in (
         ("val_factual_objective", "val factual MSE"),
         ("pool_smd_reduction", "SMD reduction (pool)"),
         ("out_smd_reduction", "SMD reduction (out)"),
+        ("pool_z_mod_norm", "|z_mod| (pool)"),
         ("pool_ate_hat", "ATE hat (pool)"),
     ):
         stat = summary.get(key)
@@ -203,7 +226,11 @@ def main(argv: Optional[List[str]] = None) -> None:
     import argparse
 
     parser = argparse.ArgumentParser(description="Run the IHDP benchmark protocol.")
-    parser.add_argument("--config", default=None, help="path to a per-dataset YAML config")
+    parser.add_argument(
+        "--config",
+        default=str(DEFAULT_CONFIG),
+        help="path to a per-dataset YAML config (default: the shipped ihdp.yaml)",
+    )
     parser.add_argument("--prior", default=None, help="path to a cached P_U.npz (real prior)")
     parser.add_argument(
         "--realizations",
@@ -218,14 +245,22 @@ def main(argv: Optional[List[str]] = None) -> None:
         help="share of the 672 training units held out for selection (0 = fit on all)",
     )
     parser.add_argument("--epochs", type=int, default=None)
+    parser.add_argument(
+        "--alpha-mmd",
+        type=float,
+        default=None,
+        help="weight on the MMD balancing term (overrides the config)",
+    )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--json-out", default=None, help="write the full summary as JSON")
     parser.add_argument("--verbose", action="store_true", help="log every training curve")
     args = parser.parse_args(argv)
 
-    overrides = {"dataset": "ihdp"}
+    overrides: Dict[str, object] = {"dataset": "ihdp"}
     if args.epochs is not None:
         overrides["epochs"] = args.epochs
+    if args.alpha_mmd is not None:
+        overrides["alpha_mmd"] = args.alpha_mmd
     cfg = load_config(args.config, **overrides)
 
     if args.prior is None:
@@ -235,6 +270,7 @@ def main(argv: Optional[List[str]] = None) -> None:
     summary, runs = run_benchmark(
         cfg, realizations, args.prior, args.val_fraction, args.seed, args.verbose
     )
+    print(f"alpha_mmd={cfg.alpha_mmd} epochs={cfg.epochs} k_latent={cfg.k_latent}")
     print(format_benchmark(summary, len(realizations)))
 
     if args.json_out is not None:
