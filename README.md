@@ -152,7 +152,27 @@ covariate set and the embedding model, not on anything learned.
    the model, so a small sentence encoder is a legitimate choice if a 7B one is awkward
    to run.
 
-5. **Train against it.** Every entry point takes `--prior`:
+5. **Check it before trusting it**, which costs nothing - it runs on the cached `V`, with
+   no GPU, no model and no dataset:
+
+   ```bash
+   python -m ssae_cfr.prior.build diagnose --dataset ihdp
+   ```
+
+   It prints the SVD spectrum and the mean pairwise cosine, then each covariate's nearest
+   neighbors. Read the neighbors: covariates that mean similar things must sit together.
+   A `k_svd` of 1 or 2 is a failure signal rather than an efficient prior - it means the
+   embeddings are nearly collinear, which is why `V` is centered before the SVD by default
+   (`--no-center` to disable, not recommended).
+
+   `V` is the expensive artifact; `P_U` is one SVD of an `m x d_LLM` matrix. So rank
+   selection is free once `V` is cached - `--reuse-V` rebuilds `P_U` without re-embedding:
+
+   ```bash
+   python -m ssae_cfr.prior.build build --dataset ihdp --reuse-V --energy 0.95
+   ```
+
+6. **Train against it.** Every entry point takes `--prior`:
 
    ```bash
    python -m ssae_cfr.experiments.ihdp --prior artifacts/ihdp/P_U.npz
