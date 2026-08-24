@@ -85,8 +85,24 @@ def fit(
     cfg: TrainConfig,
     log_every: int = 25,
     verbose: bool = True,
+    val: Optional[Dataset] = None,
 ) -> List[dict]:
-    """Train `model` on a standardized `dataset`; return the per-epoch history."""
+    """Train `model` on a standardized `dataset`; return the per-epoch history.
+
+    When `cfg.patience > 0` and a `val` split is supplied, training stops once the
+    validation factual objective has not improved by `cfg.min_delta` for `patience`
+    consecutive checks, and the model is rewound to the best-scoring weights. The
+    criterion is the *normalized* factual objective on data the model never fits - the
+    only stopping rule available on a dataset with no oracle, and the same one selection
+    uses. Stopping on PEHE would be oracle peeking and would not transfer off IHDP.
+
+    Two honest caveats. (1) The criterion scores each unit only on the arm it received,
+    so it constrains the factual head and leaves the counterfactual head free; the epoch
+    that minimizes it is not necessarily the epoch that minimizes PEHE. (2) Once the
+    stopping epoch is chosen on `val`, the reported `val_` scores are no longer unbiased
+    held-out estimates - they are minima over a search. Select on them, report from
+    `out_`.
+    """
     x_np = np.asarray(dataset.x, dtype=np.float32)
     t_np = np.asarray(dataset.t)
     x = torch.from_numpy(x_np)
@@ -97,6 +113,13 @@ def fit(
     n = dataset.n
     batch = cfg.batch_size or n
     history: List[dict] = []
+
+    stopping = cfg.patience > 0 and val is not None and val.n > 0
+    best_score, best_state, best_epoch, since_best = float("inf"), None, -1, 0
+    if stopping:
+        # local import: evaluate imports fit from this module, so a top-level import
+        # here would close the cycle
+        from .evaluate import factual_objective
 
     for epoch in range(cfg.epochs):
         model.train()
@@ -127,6 +150,27 @@ def fit(
                 f"align {last['L_align']:.4f} g {last['gamma']:.2f}) | "
                 f"lam {last['lam_mean']:.2f}+-{last['lam_std']:.2f} omega {last['omega']:.2f}"
             )
+
+        if not stopping:
+            continue
+        if epoch % cfg.es_check_every and epoch != cfg.epochs - 1:
+            continue
+        score = factual_objective(model, val, normalized=True)
+        last["val_objective"] = score
+        if score < best_score - cfg.min_delta:
+            best_score, best_epoch, since_best = score, epoch, 0
+            # detached CPU copy: the live tensors keep training under us otherwise
+            best_state = {k: v.detach().clone() for k, v in model.state_dict().items()}
+        else:
+            since_best += 1
+            if since_best >= cfg.patience:
+                if verbose:
+                    print(f"early stop at epoch {epoch} (best {best_score:.4f} @ {best_epoch})")
+                break
+
+    if stopping and best_state is not None:
+        model.load_state_dict(best_state)
+        history.append({"early_stopped_to_epoch": best_epoch, "best_val_objective": best_score})
     return history
 
 

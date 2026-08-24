@@ -78,6 +78,15 @@ class TrainConfig:
     weight_decay: float = 1e-4
     batch_size: Optional[int] = None         # None => full-batch (IHDP/ACTG175)
 
+    # -- early stopping ------------------------------------------
+    # patience = 0 disables it, which is the default: turning it on changes every
+    # number the harness produces, so it has to be an explicit choice. Monitored on
+    # the validation split's normalized factual objective - the only criterion that
+    # needs no oracle. Needs a validation split; without one it is silently inert.
+    patience: int = 0                        # epochs without improvement before stopping
+    min_delta: float = 0.0                   # improvement smaller than this doesn't count
+    es_check_every: int = 5                  # epochs between validation evaluations
+
     def __post_init__(self) -> None:
         # tuple-ify sequence fields so a config is safely hashable/immutable-ish
         self.encoder_hidden = tuple(self.encoder_hidden)
@@ -102,6 +111,12 @@ class TrainConfig:
             raise ValueError("k_svd must be >= 1 or None (auto)")
         if self.gamma_warmup < 0 or self.epochs < 1:
             raise ValueError("gamma_warmup >= 0 and epochs >= 1 required")
+        if self.patience < 0:
+            raise ValueError("patience must be >= 0 (0 disables early stopping)")
+        if self.min_delta < 0.0:
+            raise ValueError("min_delta must be >= 0")
+        if self.es_check_every < 1:
+            raise ValueError("es_check_every must be >= 1")
 
     # -- (de)serialisation -------------------------------------------------
 

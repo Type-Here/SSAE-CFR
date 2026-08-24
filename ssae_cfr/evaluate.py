@@ -119,12 +119,26 @@ def _potential_outcomes(
     )
 
 
-def factual_objective(model: SSAECFR, ds: Dataset) -> float:
+def factual_objective(model: SSAECFR, ds: Dataset, normalized: bool = False) -> float:
     """Held-out factual loss - the selection criterion a real deployment could compute.
 
     PEHE needs counterfactuals, so tuning against it is oracle peeking and the chosen
     value would not transfer. This is the honest alternative: how well the model predicts
     the outcome it actually observed, on data it was not fit on. Lower is better.
+
+    Read it as a filter, not a ranking. It scores each unit only on the arm that unit
+    actually received, so for every unit one of the two terms of `tau = y1 - y0` is left
+    completely unconstrained - and the counterfactual head is least constrained exactly
+    where overlap is worst, which on IHDP is where the difficulty was deliberately put.
+    A model that scores badly here is definitely bad; one that scores well may still
+    estimate tau badly.
+
+    `normalized` divides by `var(y)` (continuous outcomes), giving the loss on the scale
+    the model actually optimizes. Averaging the raw version across datasets - or across
+    IHDP realizations, whose outcome scale varies about twentyfold - averages squared
+    quantities in incompatible units, and a handful of large-outcome realizations then
+    decide the mean on their own. A binary cross-entropy is already scale-free, so the
+    flag is a no-op there.
     """
     if ds.n == 0:
         return float("nan")
@@ -135,7 +149,11 @@ def factual_objective(model: SSAECFR, ds: Dataset) -> float:
     if ds.outcome_type == "binary":
         p = np.clip(yf_hat, 1e-7, 1.0 - 1e-7)
         return float(-np.mean(ds.yf * np.log(p) + (1.0 - ds.yf) * np.log(1.0 - p)))
-    return float(np.mean((yf_hat - ds.yf) ** 2))
+    mse = float(np.mean((yf_hat - ds.yf) ** 2))
+    if not normalized:
+        return mse
+    _, y_scale = model.outcome_affine
+    return mse / (y_scale ** 2) if y_scale > 0.0 else float("nan")
 
 
 def _bootstrap_ci(
@@ -288,17 +306,32 @@ def fit_and_score(
         y_loc=y_loc,
         y_scale=y_scale,
     )
-    fit(model, train, cfg, verbose=verbose)
+    history = fit(model, train, cfg, verbose=verbose, val=val)
 
     scores = {f"in_{k}": v for k, v in score_split(model, train, benefit, seed).items()}
     scores.update({f"out_{k}": v for k, v in score_split(model, test, benefit, seed).items()})
+    # Both readings are kept: the raw MSE is in the outcome's own units and is the
+    # meaningful one on a single dataset, while the normalized one is what can be
+    # averaged or compared across splits whose outcome scales differ. Selection should
+    # use the normalized key - see `factual_objective`.
+    splits_to_score = [("in", train), ("out", test)]
     if val is not None and val.n > 0:
         scores.update({f"val_{k}": v for k, v in score_split(model, val, benefit, seed).items()})
-        scores["val_factual_objective"] = factual_objective(model, val)
-    scores["in_factual_objective"] = factual_objective(model, train)
-    scores["out_factual_objective"] = factual_objective(model, test)
+        splits_to_score.append(("val", val))
+    for prefix, split in splits_to_score:
+        scores[f"{prefix}_factual_objective"] = factual_objective(model, split)
+        if split.outcome_type != "binary":
+            scores[f"{prefix}_factual_objective_normalized"] = factual_objective(
+                model, split, normalized=True
+            )
     scores["treated_fraction_train"] = treated_fraction(train) or float("nan")
     scores["treated_fraction_test"] = treated_fraction(test) or float("nan")
+    # How long training actually ran, so a summary can show whether early stopping bit
+    # and where. Without it a stopped run is indistinguishable from a short one.
+    if history and "early_stopped_to_epoch" in history[-1]:
+        scores["stopped_at_epoch"] = float(history[-1]["early_stopped_to_epoch"])
+    else:
+        scores["stopped_at_epoch"] = float(cfg.epochs - 1)
     return model, scores
 
 
@@ -314,8 +347,9 @@ def run_once(
     """Fit one model on `dataset_name` and score the splits.
 
     Keys are prefixed `in_` (train), `val_` (validation, when `val_size > 0`) and `out_`
-    (test). `val_factual_objective` is the oracle-free number to select hyperparameters
-    on; nothing that feeds a reported result should ever be selected on an `out_` key.
+    (test). `val_factual_objective_normalized` is the oracle-free number to select
+    hyperparameters on; nothing that feeds a reported result should ever be selected on
+    an `out_` key.
     """
     if dataset_name not in LOADERS:
         raise KeyError(f"unknown dataset {dataset_name!r}; known: {sorted(LOADERS)}")
