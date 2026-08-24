@@ -227,6 +227,50 @@ def score_split(model: SSAECFR, ds: Dataset, benefit: bool, seed: int = 0) -> Di
 # -- one run, and a set of runs --------------------------------------------
 
 
+def fit_and_score(
+    train: Dataset,
+    test: Dataset,
+    cfg: TrainConfig,
+    val: Optional[Dataset] = None,
+    prior_path: Optional[str] = None,
+    benefit: bool = False,
+    seed: int = 0,
+    verbose: bool = False,
+) -> Tuple[SSAECFR, Dict[str, float]]:
+    """Fit one model on already-split, already-standardized data and score every split.
+
+    The split is the caller's business: `run_once` draws one, while a benchmark that
+    ships its own partition (IHDP's replication files) passes that partition straight
+    through. Everything downstream of the split is identical either way, which is what
+    keeps the two protocols comparable to each other.
+
+    Returns the fitted model alongside the scores so a caller can keep probing it.
+    """
+    if prior_path is not None:
+        P_U = load_prior_for(train, prior_path)
+    else:
+        P_U = build_projector_for(train, cfg)
+
+    model = SSAECFR(
+        m=train.m,
+        P_U=torch.as_tensor(P_U, dtype=torch.float32),
+        cfg=cfg,
+        outcome_type=train.outcome_type,
+    )
+    fit(model, train, cfg, verbose=verbose)
+
+    scores = {f"in_{k}": v for k, v in score_split(model, train, benefit, seed).items()}
+    scores.update({f"out_{k}": v for k, v in score_split(model, test, benefit, seed).items()})
+    if val is not None and val.n > 0:
+        scores.update({f"val_{k}": v for k, v in score_split(model, val, benefit, seed).items()})
+        scores["val_factual_objective"] = factual_objective(model, val)
+    scores["in_factual_objective"] = factual_objective(model, train)
+    scores["out_factual_objective"] = factual_objective(model, test)
+    scores["treated_fraction_train"] = treated_fraction(train) or float("nan")
+    scores["treated_fraction_test"] = treated_fraction(test) or float("nan")
+    return model, scores
+
+
 def run_once(
     dataset_name: str,
     cfg: TrainConfig,
@@ -250,31 +294,17 @@ def run_once(
 
     ds = LOADERS[dataset_name]()
     splits = split_and_standardize(ds, test_size=test_size, val_size=val_size, seed=seed)
-    train, test = splits.train, splits.test
 
-    if prior_path is not None:
-        P_U = load_prior_for(train, prior_path)
-    else:
-        P_U = build_projector_for(train, cfg)
-
-    model = SSAECFR(
-        m=train.m,
-        P_U=torch.as_tensor(P_U, dtype=torch.float32),
-        cfg=cfg,
-        outcome_type=train.outcome_type,
+    _, scores = fit_and_score(
+        splits.train,
+        splits.test,
+        cfg,
+        val=splits.val,
+        prior_path=prior_path,
+        benefit=OUTCOME_IS_BENEFIT.get(dataset_name, False),
+        seed=seed,
+        verbose=verbose,
     )
-    fit(model, train, cfg, verbose=verbose)
-
-    benefit = OUTCOME_IS_BENEFIT.get(dataset_name, False)
-    scores = {f"in_{k}": v for k, v in score_split(model, train, benefit, seed).items()}
-    scores.update({f"out_{k}": v for k, v in score_split(model, test, benefit, seed).items()})
-    if splits.val is not None:
-        scores.update({f"val_{k}": v for k, v in score_split(model, splits.val, benefit, seed).items()})
-        scores["val_factual_objective"] = factual_objective(model, splits.val)
-    scores["in_factual_objective"] = factual_objective(model, train)
-    scores["out_factual_objective"] = factual_objective(model, test)
-    scores["treated_fraction_train"] = treated_fraction(train) or float("nan")
-    scores["treated_fraction_test"] = treated_fraction(test) or float("nan")
     return scores
 
 
