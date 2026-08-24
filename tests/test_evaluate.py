@@ -86,6 +86,34 @@ def test_continuous_outcomes_are_put_back_on_the_callers_scale():
     assert y1 == pytest.approx([8.5, 1.5])
 
 
+def test_normalized_factual_objective_divides_by_the_outcome_variance():
+    """The selection criterion has to be comparable across differing outcome scales."""
+    ds = _dataset()
+    model = _model(ds.x.shape[1])
+    raw = factual_objective(model, ds)
+    assert factual_objective(model, ds, normalized=True) == pytest.approx(raw)
+
+    scaled = SSAECFR(m=ds.x.shape[1], P_U=torch.eye(ds.x.shape[1], dtype=torch.float32),
+                     cfg=load_config(None, k_latent=4, encoder_hidden=(8,), decoder_hidden=(8,),
+                                     head_hidden=(4,), gating_hidden=(4,)),
+                     outcome_type="continuous", y_loc=0.0, y_scale=4.0)
+    scaled.load_state_dict(model.state_dict() | {
+        "y_loc": torch.tensor(0.0), "y_scale": torch.tensor(4.0)
+    })
+    assert factual_objective(scaled, ds, normalized=True) == pytest.approx(
+        factual_objective(scaled, ds) / 16.0
+    )
+
+
+def test_normalization_is_a_no_op_for_a_binary_outcome():
+    """A cross-entropy is already scale-free; there is nothing to divide by."""
+    ds = _dataset(outcome_type="binary")
+    model = _model(ds.x.shape[1], outcome_type="binary")
+    assert factual_objective(model, ds, normalized=True) == pytest.approx(
+        factual_objective(model, ds)
+    )
+
+
 def test_the_outcome_scale_is_fit_on_the_training_split_only():
     """Like the covariate standardizer: a property of the data the model was shown.
 

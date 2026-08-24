@@ -9,6 +9,7 @@ tiny synthetic dataset.
 from __future__ import annotations
 
 import numpy as np
+import pytest
 import torch
 
 from ssae_cfr.config import load_config
@@ -153,7 +154,6 @@ def test_loss_standardizes_the_target_to_meet_the_heads():
 
 def test_binary_outcome_refuses_a_scale():
     """A probability is already on its own scale; asking to standardize it is a bug."""
-    import pytest
     with pytest.raises(ValueError, match="never standardized"):
         _model(outcome_type="binary", y_scale=2.0)
 
@@ -173,3 +173,69 @@ def test_fit_drives_loss_down_on_synthetic():
     model, _ = _model(cfg)
     history = fit(model, ds, cfg, verbose=False)
     assert history[-1]["L_fact"] < history[0]["L_fact"], "factual loss should fall"
+
+
+# -- early stopping --------------------------------------------------------
+
+
+def _synthetic(n=200, seed=0):
+    rng = np.random.default_rng(seed)
+    x = rng.standard_normal((n, M))
+    t = (rng.random(n) < 0.5).astype(np.int64)
+    yf = x[:, 0] + 2.0 * t + 0.1 * rng.standard_normal(n)
+    ds = Dataset(name="synthetic", x=x, t=t, yf=yf,
+                 feature_names=[f"x{i}" for i in range(M)])
+    return standardize_dataset(ds)[0]
+
+
+def _es_cfg(**kw):
+    base = dict(k_latent=8, encoder_hidden=(16,), decoder_hidden=(16,),
+                head_hidden=(8,), gating_hidden=(8,), epochs=60, lr=1e-2)
+    base.update(kw)
+    return load_config(None, **base)
+
+
+def test_patience_zero_leaves_training_untouched():
+    """The default must not change any existing number."""
+    ds, val = _synthetic(), _synthetic(n=60, seed=1)
+    model, _ = _model(_es_cfg(patience=0))
+    history = fit(model, ds, _es_cfg(patience=0), verbose=False, val=val)
+    assert len(history) == 60
+    assert not any("early_stopped_to_epoch" in h for h in history)
+
+
+def test_early_stopping_needs_a_validation_split():
+    """Without val there is no feasible criterion, so it stays inert rather than guessing."""
+    ds = _synthetic()
+    cfg = _es_cfg(patience=1, es_check_every=1)
+    model, _ = _model(cfg)
+    history = fit(model, ds, cfg, verbose=False, val=None)
+    assert len(history) == 60
+
+
+def test_early_stopping_rewinds_to_the_best_epoch():
+    """Stopping must restore the best weights, not keep the ones that triggered it."""
+    ds, val = _synthetic(), _synthetic(n=60, seed=1)
+    cfg = _es_cfg(patience=1, es_check_every=1, epochs=200)
+    model, _ = _model(cfg)
+    history = fit(model, ds, cfg, verbose=False, val=val)
+
+    assert "early_stopped_to_epoch" in history[-1], "should have stopped before 200 epochs"
+    best_epoch = history[-1]["early_stopped_to_epoch"]
+    checks = [h["val_objective"] for h in history if "val_objective" in h]
+    best_seen = min(checks)
+    # the restored weights must actually score the best value that was seen
+    from ssae_cfr.evaluate import factual_objective
+    assert factual_objective(model, val, normalized=True) == pytest.approx(best_seen, rel=1e-5)
+    assert history[-1]["best_val_objective"] == pytest.approx(best_seen, rel=1e-5)
+    assert best_epoch <= max(h["epoch"] for h in history if "epoch" in h)
+
+
+def test_min_delta_ignores_negligible_improvement():
+    """A huge min_delta means nothing counts as improvement, so it stops at the first check."""
+    ds, val = _synthetic(), _synthetic(n=60, seed=1)
+    cfg = _es_cfg(patience=1, es_check_every=1, min_delta=1e6, epochs=200)
+    model, _ = _model(cfg)
+    history = fit(model, ds, cfg, verbose=False, val=val)
+    epochs_run = [h["epoch"] for h in history if "epoch" in h]
+    assert max(epochs_run) < 10, "should give up almost immediately"
