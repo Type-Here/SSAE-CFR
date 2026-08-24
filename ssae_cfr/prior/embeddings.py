@@ -33,16 +33,24 @@ PathLike = Union[str, Path]
 
 
 def _load_model(model_name: str, device: str, dtype: str):
-    """Load the frozen embedding model, at a width that fits the device.
+    """Load the frozen embedding model without ever holding it whole in system RAM.
 
-    Loading a 7B model at the HuggingFace default of float32 costs about 28 GB of
-    weights, which no free-tier GPU host can hold - and the failure happens in system
-    RAM, during the load, before anything reaches the accelerator. On a GPU we therefore
-    default to float16, which is the width these models were released at anyway; on CPU
-    we stay in float32, since float16 there is slow and unsupported for some ops.
+    Returns `(model, input_device)` - the device to put the tokenized batch on, which is
+    not always the one asked for once the weights have been dispatched across devices.
 
-    `low_cpu_mem_usage` streams the checkpoint shard by shard instead of materializing a
-    full copy first, which is what keeps the load inside a 12 GB RAM allowance.
+    Two separate memory problems have to be dodged, and only the first is obvious.
+
+    Width: a 7B model at HuggingFace's float32 default is about 28 GB of weights. On a
+    GPU we therefore default to float16, the width these models were released at; on CPU
+    we stay in float32, where float16 is slow and unsupported for some ops.
+
+    Placement: the natural `from_pretrained(...).to(device)` still materializes the whole
+    model in *CPU* RAM before moving it, so a float16 7B model (about 13.5 GB) is killed
+    on a host with 12.7 GB of RAM even though the GPU it was headed for had room. The
+    failure looks like a hang partway through "Loading weights" and is easy to misread as
+    a download problem. Passing `device_map` makes accelerate place each tensor on its
+    destination as the checkpoint is read, so peak host memory is one shard rather than
+    one model. When the model is dispatched this way, `.to()` must not be called on it.
     """
     import torch
     from transformers import AutoModel
@@ -52,12 +60,24 @@ def _load_model(model_name: str, device: str, dtype: str):
     torch_dtype = getattr(torch, dtype)
 
     kwargs = {"low_cpu_mem_usage": True}
+    if device.startswith("cuda"):
+        # "auto" rather than a fixed device: if the weights do not quite fit in VRAM it
+        # spills the remainder to CPU instead of failing, which is slow but finishes.
+        kwargs["device_map"] = "auto"
+
     try:
         model = AutoModel.from_pretrained(model_name, dtype=torch_dtype, **kwargs)
     except TypeError:
         # older transformers spell it `torch_dtype`
         model = AutoModel.from_pretrained(model_name, torch_dtype=torch_dtype, **kwargs)
-    return model.to(device).eval()
+
+    if "device_map" not in kwargs:
+        model = model.to(device)
+    model.eval()
+
+    # a dispatched model has no single device; feed it wherever its first weights landed
+    input_device = next(model.parameters()).device
+    return model, input_device
 
 
 def build_embeddings(
@@ -89,7 +109,7 @@ def build_embeddings(
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
-    model = _load_model(model_name, device, dtype)
+    model, input_device = _load_model(model_name, device, dtype)
 
     vectors = []
     with torch.no_grad():
@@ -101,7 +121,7 @@ def build_embeddings(
                 padding=True,
                 truncation=True,
                 max_length=max_length,
-            ).to(device)
+            ).to(input_device)
             out = model(**enc)
             # pool in float32: the model may be running in half precision, and a
             # half-precision sum over the sequence loses precision for no gain here
