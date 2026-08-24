@@ -20,6 +20,7 @@ from .embeddings import (
 )
 from .projector import (
     build_projector,
+    cosine_similarities,
     choose_k_svd,
     load_projector,
     retention,
@@ -33,6 +34,7 @@ __all__ = [
     "load_embeddings",
     "placeholder_embeddings",
     "build_projector",
+    "cosine_similarities",
     "choose_k_svd",
     "retention",
     "svd_energy",

@@ -21,6 +21,28 @@ Two things are deliberately kept apart:
 
 `P_U` is data-independent: it depends only on the covariate descriptions, not on the
 patients, so it is computed once and cached per dataset.
+
+Centering
+---------
+`center=True` subtracts the mean embedding (the column-wise mean over the m rows) before
+the SVD, and it should normally be on. Language-model embedding spaces are strongly
+anisotropic: every string lands in a narrow cone, so `V` is close to `1 mu^T` plus small
+deviations. Left uncentered, the leading singular direction is that shared offset, whose
+left singular vector is approximately the all-ones vector in `R^m` - it says "all
+covariates move together", which is not a semantic direction. It then swallows most of
+the spectral energy, and an energy threshold picks a rank of 1 or 2 that captures
+"everything" while encoding nothing. Shared prompt boilerplate makes this worse, since
+most of every string is identical across covariates.
+
+What the projector is actually asked for is which covariates mean *similar* things to
+which - the between-covariate structure - and a constant offset carries none of it.
+Removing it is both the standard remedy for anisotropy and the more faithful statement
+of the question.
+
+The trade-off is worth stating: after centering, `1^T V_c = 0`, so the all-ones direction
+lies in the null space of `P_U` by construction. A uniform shift across all (standardized)
+covariates is therefore never explained by the prior. On standardized data that direction
+carries little meaning, but it is a real consequence rather than a free lunch.
 """
 
 from __future__ import annotations
@@ -34,19 +56,40 @@ import numpy as np
 PathLike = Union[str, Path]
 
 
-def svd_energy(V: np.ndarray) -> np.ndarray:
+def _prepare(V: np.ndarray, center: bool) -> np.ndarray:
+    """`V` as float64, with the mean embedding removed when `center` is set."""
+    V = np.asarray(V, dtype=np.float64)
+    if V.ndim != 2:
+        raise ValueError(f"V must be 2-D (m, d_LLM); got shape {V.shape}")
+    return V - V.mean(axis=0, keepdims=True) if center else V
+
+
+def svd_energy(V: np.ndarray, center: bool = False) -> np.ndarray:
     """Cumulative explained-variance curve of the SVD spectrum of `V`.
 
     Returns an array `energy` of length `min(m, d_LLM)` where `energy[k-1]` is the
     fraction of squared singular-value mass captured by the top-k singular vectors.
     Used both by `choose_k_svd` and for logging the spectrum in a run.
     """
-    V = np.asarray(V, dtype=np.float64)
-    s = np.linalg.svd(V, compute_uv=False)
+    s = np.linalg.svd(_prepare(V, center), compute_uv=False)
     total = np.sum(s ** 2)
     if total == 0.0:
         raise ValueError("V has zero singular-value mass (all-zero embeddings?)")
     return np.cumsum(s ** 2) / total
+
+
+def cosine_similarities(V: np.ndarray, center: bool = False) -> np.ndarray:
+    """The m x m matrix of cosine similarities between covariate embeddings.
+
+    The direct read on whether an embedding run produced anything usable. A mean
+    off-diagonal similarity near 1 means every covariate embedded to nearly the same
+    place and the prior will be degenerate however `k_svd` is chosen.
+    """
+    V = _prepare(V, center)
+    norms = np.linalg.norm(V, axis=1, keepdims=True)
+    norms[norms == 0.0] = 1.0
+    unit = V / norms
+    return unit @ unit.T
 
 
 def choose_k_svd(
@@ -56,6 +99,7 @@ def choose_k_svd(
     retention_floor: float = 0.5,
     k_min: int = 2,
     k_max: Optional[int] = None,
+    center: bool = False,
 ) -> int:
     """Pick the rank `k_svd` of `P_U` from the SVD spectrum of `V`.
 
@@ -70,8 +114,12 @@ def choose_k_svd(
     filter that would make the prior vacuous). Erring toward larger k is safer: a
     too-small k suppresses weak clinical signals, which the alignment loss would then
     wrongly penalize.
+
+    The energy criterion assumes the spectrum reflects semantic structure. On an
+    uncentered anisotropic `V` it does not, and the threshold returns a rank of 1 or 2
+    that looks efficient and means nothing - see the module docstring on `center`.
     """
-    V = np.asarray(V, dtype=np.float64)
+    V = _prepare(V, center)
     m = V.shape[0]
     hard_max = m - 1
     if k_max is None:
@@ -99,14 +147,15 @@ def choose_k_svd(
     return k
 
 
-def build_projector(V: np.ndarray, k_svd: int) -> np.ndarray:
+def build_projector(V: np.ndarray, k_svd: int, center: bool = False) -> np.ndarray:
     """Build the m x m orthogonal projector `P_U = U_k U_k^T` from `V` and a fixed k.
 
     `V` is the embedding matrix (m x d_LLM); `k_svd` the number of leading left
     singular vectors to retain. The result is symmetric, idempotent, has rank `k_svd`
-    and eigenvalues in {0, 1}.
+    and eigenvalues in {0, 1}, whether or not `V` was centered first - centering changes
+    which subspace is retained, never the fact that `P_U` is an orthogonal projector.
     """
-    V = np.asarray(V, dtype=np.float64)
+    V = _prepare(V, center)
     m = V.shape[0]
     if not (1 <= k_svd <= m):
         raise ValueError(f"k_svd must be in [1, m={m}]; got {k_svd}")
