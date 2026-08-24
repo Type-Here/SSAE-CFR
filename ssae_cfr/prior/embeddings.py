@@ -32,22 +32,52 @@ import numpy as np
 PathLike = Union[str, Path]
 
 
+def _load_model(model_name: str, device: str, dtype: str):
+    """Load the frozen embedding model, at a width that fits the device.
+
+    Loading a 7B model at the HuggingFace default of float32 costs about 28 GB of
+    weights, which no free-tier GPU host can hold - and the failure happens in system
+    RAM, during the load, before anything reaches the accelerator. On a GPU we therefore
+    default to float16, which is the width these models were released at anyway; on CPU
+    we stay in float32, since float16 there is slow and unsupported for some ops.
+
+    `low_cpu_mem_usage` streams the checkpoint shard by shard instead of materializing a
+    full copy first, which is what keeps the load inside a 12 GB RAM allowance.
+    """
+    import torch
+    from transformers import AutoModel
+
+    if dtype == "auto":
+        dtype = "float16" if device.startswith("cuda") else "float32"
+    torch_dtype = getattr(torch, dtype)
+
+    kwargs = {"low_cpu_mem_usage": True}
+    try:
+        model = AutoModel.from_pretrained(model_name, dtype=torch_dtype, **kwargs)
+    except TypeError:
+        # older transformers spell it `torch_dtype`
+        model = AutoModel.from_pretrained(model_name, torch_dtype=torch_dtype, **kwargs)
+    return model.to(device).eval()
+
+
 def build_embeddings(
     descriptions: Sequence[str],
     model_name: str = "BioMistral/BioMistral-7B",
     batch_size: int = 8,
     max_length: int = 128,
     device: str = "auto",
+    dtype: str = "auto",
 ) -> np.ndarray:
     """Embed `m` covariate descriptions into V of shape (m, d_LLM).
 
     Runs the frozen model once per description (batched), takes the last hidden state,
     and mean-pools over the attention mask so padding tokens do not dilute the vector.
-    `model_name` is any HuggingFace causal/encoder LM id. Returns a float32 array.
+    `model_name` is any HuggingFace causal/encoder LM id. Returns a float32 array
+    whatever width the model ran at, since everything downstream of here is float32.
     """
     # lazy: keep torch/transformers out of the import graph for the light paths
     import torch
-    from transformers import AutoModel, AutoTokenizer
+    from transformers import AutoTokenizer
 
     descriptions = list(descriptions)
     if not descriptions:
@@ -59,7 +89,7 @@ def build_embeddings(
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
-    model = AutoModel.from_pretrained(model_name).to(device).eval()
+    model = _load_model(model_name, device, dtype)
 
     vectors = []
     with torch.no_grad():
@@ -73,14 +103,16 @@ def build_embeddings(
                 max_length=max_length,
             ).to(device)
             out = model(**enc)
-            hidden = out.last_hidden_state              # (b, seq, d_LLM)
-            mask = enc["attention_mask"].unsqueeze(-1)  # (b, seq, 1)
+            # pool in float32: the model may be running in half precision, and a
+            # half-precision sum over the sequence loses precision for no gain here
+            hidden = out.last_hidden_state.float()      # (b, seq, d_LLM)
+            mask = enc["attention_mask"].unsqueeze(-1).float()  # (b, seq, 1)
             summed = (hidden * mask).sum(dim=1)         # mask out padding
             counts = mask.sum(dim=1).clamp(min=1)
             pooled = summed / counts                    # mean over real tokens
-            vectors.append(pooled.float().cpu().numpy())
+            vectors.append(pooled.cpu().numpy())
 
-    V = np.concatenate(vectors, axis=0)
+    V = np.concatenate(vectors, axis=0).astype(np.float32)
     if V.shape[0] != len(descriptions):
         raise RuntimeError(f"got {V.shape[0]} vectors for {len(descriptions)} descriptions")
     return V
