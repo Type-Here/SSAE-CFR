@@ -4,8 +4,14 @@ The embedding model does not see a bare column name; it sees a standardized prom
 a short human-readable gloss slotted in, so that `bun` becomes a sentence about blood
 urea nitrogen rather than the token "bun". The gloss for each covariate lives in a
 per-dataset YAML (feature_name -> gloss) under `prior/glosses/`, authored and versioned
-with the code. The prompt template is fixed and dataset-independent; only the gloss
-changes.
+with the code.
+
+The prompt template defaults to a clinical one, which suits the ICU and trial datasets
+but not every dataset here: IHDP's covariates are obstetric and socioeconomic, and
+asking a model for the "physiological role" of a mother's education level pushes every
+one of those vectors toward the same unhelpful region. A gloss file may therefore set
+its own template under the reserved key `_template`. Reserved keys start with an
+underscore and are never treated as covariates.
 
 Workflow:
   1. `emit_gloss_template` writes a YAML stub for a dataset, one line per covariate in
@@ -32,19 +38,42 @@ PathLike = Union[str, Path]
 
 PROMPT_TEMPLATE = "Physiological role and prognostic impact of {gloss} in the clinical context."
 
+TEMPLATE_KEY = "_template"
+
 
 def prettify(name: str) -> str:
     """A readable default gloss from a column name: underscores to spaces."""
     return name.replace("_", " ").strip()
 
 
-def load_glosses(path: PathLike) -> Dict[str, str]:
-    """Load a feature_name -> gloss mapping from YAML (order preserved)."""
+def _read_yaml_mapping(path: PathLike) -> Dict[str, str]:
     with open(path, "r", encoding="utf-8") as fh:
         data = yaml.safe_load(fh) or {}
     if not isinstance(data, Mapping):
         raise TypeError(f"{path} must contain a YAML mapping of feature_name -> gloss")
     return {str(k): ("" if v is None else str(v)) for k, v in data.items()}
+
+
+def load_glosses(path: PathLike) -> Dict[str, str]:
+    """Load a feature_name -> gloss mapping from YAML (order preserved).
+
+    Reserved keys (anything starting with an underscore, currently just `_template`) are
+    settings rather than covariates and are excluded, so the caller can keep treating
+    the returned keys as the covariate order.
+    """
+    return {k: v for k, v in _read_yaml_mapping(path).items() if not k.startswith("_")}
+
+
+def load_prompt_template(path: PathLike, default: str = PROMPT_TEMPLATE) -> str:
+    """The gloss file's own prompt template, or `default` when it does not set one.
+
+    The template must contain a `{gloss}` field; anything else would silently produce m
+    identical prompts and therefore a rank-1 V.
+    """
+    template = str(_read_yaml_mapping(path).get(TEMPLATE_KEY, "")).strip() or default
+    if "{gloss}" not in template:
+        raise ValueError(f"prompt template must contain '{{gloss}}'; got {template!r}")
+    return template
 
 
 def missing_glosses(feature_names: Sequence[str], glosses: Mapping[str, str]) -> List[str]:
