@@ -146,6 +146,9 @@ def run_realization(
     )
     scores.update({f"pool_{k}": v for k, v in score_split(model, pool_split, True, seed).items()})
     scores["pool_factual_objective"] = factual_objective(model, pool_split)
+    scores["pool_factual_objective_normalized"] = factual_objective(
+        model, pool_split, normalized=True
+    )
     scores["realization"] = float(realization)
     return scores
 
@@ -190,12 +193,24 @@ def format_benchmark(summary: Dict[str, Dict[str, float]], n_realizations: int) 
         sem = stat["std"] / np.sqrt(stat["n_runs"]) if stat["n_runs"] > 1 else 0.0
         return f"{stat['mean']:.2f} +- {sem:.2f}"
 
-    # One row, the mean, in the outcome's own units - the same statistic the published
-    # rows below report, so the table can be read straight down. The median of each
-    # metric is in the summary dict and the --json-out file for anyone who wants it.
+    def median_cell(key: str) -> str:
+        stat = summary.get(key)
+        if stat is None or not np.isfinite(stat.get("median", float("nan"))):
+            return "-"
+        return f"{stat['median']:.2f}"
+
+    # The mean first, in the outcome's own units, because that is the statistic the
+    # published rows report and the table has to be readable straight down. The median
+    # sits under it because on this benchmark the two disagree by a factor of two: IHDP
+    # redraws the response surface per realization, so PEHE is heavy-tailed and the mean
+    # describes the handful of realizations that drew the largest outcomes. Report both.
     lines.append(
         f"{'SSAE-CFR':<12}{cell('pool_pehe'):>16}{cell('out_pehe'):>16}"
         f"{cell('pool_eps_ate'):>15}{cell('out_eps_ate'):>15}"
+    )
+    lines.append(
+        f"{'  (median)':<12}{median_cell('pool_pehe'):>16}{median_cell('out_pehe'):>16}"
+        f"{median_cell('pool_eps_ate'):>15}{median_cell('out_eps_ate'):>15}"
     )
     lines.append("")
     lines.append(f"published, for reference ({REFERENCE_SOURCE}):")
@@ -207,16 +222,23 @@ def format_benchmark(summary: Dict[str, Dict[str, float]], n_realizations: int) 
     lines.append(REFERENCE_CAVEAT)
 
     lines.append("-" * 74)
+    # The normalized factual loss is the selection number: the raw MSE is in squared
+    # outcome units, so across realizations it is dominated by which ones drew big
+    # outcomes rather than by how well anything fit.
     for key, label in (
-        ("val_factual_objective", "val factual MSE"),
+        ("val_factual_objective_normalized", "val factual MSE (norm)"),
         ("pool_smd_reduction", "SMD reduction (pool)"),
         ("out_smd_reduction", "SMD reduction (out)"),
         ("pool_z_mod_norm", "|z_mod| (pool)"),
         ("pool_ate_hat", "ATE hat (pool)"),
+        ("stopped_at_epoch", "stopped at epoch"),
     ):
         stat = summary.get(key)
         if stat is not None and np.isfinite(stat["mean"]):
-            lines.append(f"{label:<24}{stat['mean']:>10.4f} +- {stat['std']:.4f}  (sd across runs)")
+            lines.append(
+                f"{label:<24}{stat['mean']:>10.4f} +- {stat['std']:.4f}"
+                f"   median {stat['median']:.4f}"
+            )
     lines.append("true ATE is 4.0 by construction; true ATT is exactly 4.0")
     return "\n".join(lines)
 
@@ -251,6 +273,13 @@ def main(argv: Optional[List[str]] = None) -> None:
         default=None,
         help="weight on the MMD balancing term (overrides the config)",
     )
+    parser.add_argument(
+        "--patience",
+        type=int,
+        default=None,
+        help="early-stopping patience in validation checks (0 = off, the default); "
+             "needs --val-fraction > 0",
+    )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--json-out", default=None, help="write the full summary as JSON")
     parser.add_argument("--verbose", action="store_true", help="log every training curve")
@@ -261,7 +290,12 @@ def main(argv: Optional[List[str]] = None) -> None:
         overrides["epochs"] = args.epochs
     if args.alpha_mmd is not None:
         overrides["alpha_mmd"] = args.alpha_mmd
+    if args.patience is not None:
+        overrides["patience"] = args.patience
     cfg = load_config(args.config, **overrides)
+
+    if cfg.patience > 0 and args.val_fraction <= 0.0:
+        raise SystemExit("--patience needs a validation split; pass --val-fraction > 0")
 
     if args.prior is None:
         print("using PLACEHOLDER P_U (no real embeddings yet) - results are not reportable")
@@ -270,7 +304,10 @@ def main(argv: Optional[List[str]] = None) -> None:
     summary, runs = run_benchmark(
         cfg, realizations, args.prior, args.val_fraction, args.seed, args.verbose
     )
-    print(f"alpha_mmd={cfg.alpha_mmd} epochs={cfg.epochs} k_latent={cfg.k_latent}")
+    print(
+        f"alpha_mmd={cfg.alpha_mmd} epochs={cfg.epochs} k_latent={cfg.k_latent} "
+        f"patience={cfg.patience}"
+    )
     print(format_benchmark(summary, len(realizations)))
 
     if args.json_out is not None:
