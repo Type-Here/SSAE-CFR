@@ -98,15 +98,25 @@ def _forward_eval(model: SSAECFR, ds: Dataset) -> Dict[str, np.ndarray]:
     return {key: value.detach().cpu().numpy() for key, value in out.items()}
 
 
-def _potential_outcomes(out: Dict[str, np.ndarray], outcome_type: str) -> Tuple[np.ndarray, np.ndarray]:
+def _potential_outcomes(
+    out: Dict[str, np.ndarray],
+    outcome_type: str,
+    loc: float = 0.0,
+    scale: float = 1.0,
+) -> Tuple[np.ndarray, np.ndarray]:
     """(y0, y1) on the scale the causal contrast should be taken on.
 
     Delegates to `to_outcome_scale`, the same rule `SSAECFR.predict_tau` uses, so the
-    harness and the model can never disagree about what a treatment effect is.
+    harness and the model can never disagree about what a treatment effect is. Callers
+    pass the fitted model's `outcome_affine`, since a continuous head is trained against
+    a standardized outcome and its raw output is in nobody's units.
     """
     y0 = np.asarray(out["y0_hat"], dtype=np.float64).reshape(-1)
     y1 = np.asarray(out["y1_hat"], dtype=np.float64).reshape(-1)
-    return to_outcome_scale(y0, outcome_type), to_outcome_scale(y1, outcome_type)
+    return (
+        to_outcome_scale(y0, outcome_type, loc, scale),
+        to_outcome_scale(y1, outcome_type, loc, scale),
+    )
 
 
 def factual_objective(model: SSAECFR, ds: Dataset) -> float:
@@ -119,7 +129,7 @@ def factual_objective(model: SSAECFR, ds: Dataset) -> float:
     if ds.n == 0:
         return float("nan")
     out = _forward_eval(model, ds)
-    y0, y1 = _potential_outcomes(out, ds.outcome_type)
+    y0, y1 = _potential_outcomes(out, ds.outcome_type, *model.outcome_affine)
     t = np.asarray(ds.t, dtype=np.float64)
     yf_hat = t * y1 + (1.0 - t) * y0
     if ds.outcome_type == "binary":
@@ -193,7 +203,7 @@ def score_split(model: SSAECFR, ds: Dataset, benefit: bool, seed: int = 0) -> Di
     if ds.n == 0:
         return {}
     out = _forward_eval(model, ds)
-    y0, y1 = _potential_outcomes(out, ds.outcome_type)
+    y0, y1 = _potential_outcomes(out, ds.outcome_type, *model.outcome_affine)
     tau_hat = y1 - y0
 
     scores: Dict[str, float] = {
@@ -203,10 +213,18 @@ def score_split(model: SSAECFR, ds: Dataset, benefit: bool, seed: int = 0) -> Di
         "smd_reduction": smd_reduction(ds.x, out["z_mod"], ds.t),
         "lam_mean": float(np.mean(out["lam"])),
         "lam_std": float(np.std(out["lam"])),
+        # Guard against balance-by-collapse: a representation can be made perfectly
+        # balanced by shrinking it to zero, which scores well on smd_reduction and
+        # carries no information. Read the two together, never smd_reduction alone.
+        "z_mod_norm": float(np.linalg.norm(out["z_mod"], axis=-1).mean()),
     }
 
     if ds.has_oracle:
         tau_true = ds.tau_true
+        # Both metrics stay in the outcome's own units, which is how the literature
+        # defines and reports them. They are heavy-tailed across IHDP realizations
+        # because the outcome scale is; `aggregate` carries a median for that, rather
+        # than a rescaled metric that no published baseline can be compared against.
         scores["pehe"] = pehe(tau_hat, tau_true)
         scores["eps_ate"] = eps_ate(tau_hat, tau_true)
 
@@ -251,11 +269,24 @@ def fit_and_score(
     else:
         P_U = build_projector_for(train, cfg)
 
+    # The outcome scale is fit on the training split only, exactly like the covariate
+    # standardizer - it is a property of the data the model was shown, not of the data
+    # it is scored on. A degenerate (constant) training outcome falls back to 1.0.
+    y_loc, y_scale = 0.0, 1.0
+    if train.outcome_type != "binary":
+        yf_train = np.asarray(train.yf, dtype=np.float64)
+        y_loc = float(yf_train.mean())
+        y_scale = float(yf_train.std())
+        if not np.isfinite(y_scale) or y_scale <= 0.0:
+            y_loc, y_scale = 0.0, 1.0
+
     model = SSAECFR(
         m=train.m,
         P_U=torch.as_tensor(P_U, dtype=torch.float32),
         cfg=cfg,
         outcome_type=train.outcome_type,
+        y_loc=y_loc,
+        y_scale=y_scale,
     )
     fit(model, train, cfg, verbose=verbose)
 
@@ -309,17 +340,29 @@ def run_once(
 
 
 def aggregate(runs: Sequence[Dict[str, float]]) -> Dict[str, Dict[str, float]]:
-    """Mean and std of every metric across runs, ignoring nan (which mark unidentified)."""
+    """Mean, median and std of every metric across runs, ignoring nan (unidentified).
+
+    The median is carried alongside the mean because PEHE across IHDP realizations is
+    heavy-tailed: a handful of realizations draw outcomes an order of magnitude larger
+    than the rest and decide the mean on their own. Reporting only the mean describes
+    those few realizations rather than the method.
+    """
     keys = sorted({key for run in runs for key in run})
     summary: Dict[str, Dict[str, float]] = {}
     for key in keys:
         values = np.array([run[key] for run in runs if key in run], dtype=np.float64)
         finite = values[np.isfinite(values)]
         if finite.size == 0:
-            summary[key] = {"mean": float("nan"), "std": float("nan"), "n_runs": 0}
+            summary[key] = {
+                "mean": float("nan"),
+                "median": float("nan"),
+                "std": float("nan"),
+                "n_runs": 0,
+            }
             continue
         summary[key] = {
             "mean": float(finite.mean()),
+            "median": float(np.median(finite)),
             "std": float(finite.std(ddof=1)) if finite.size > 1 else 0.0,
             "n_runs": int(finite.size),
         }
