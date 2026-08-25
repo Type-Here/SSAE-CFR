@@ -67,8 +67,33 @@ def _make_optimizer(model: torch.nn.Module, cfg: TrainConfig) -> torch.optim.Opt
     return factory(model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
 
 
+_SHARE_LABELS = (("L_fact", "fac"), ("L_mmd", "mmd"), ("L_sparse", "spa"),
+                 ("L_rec", "rec"), ("L_align", "ali"))
+
+
+def format_shares(breakdown: dict) -> str:
+    """The five share_* entries as one compact `fac 35% rec 58% ...` string.
+
+    Printed next to the raw term values because the raw values cannot be compared to
+    each other: they carry different weights and live on different natural scales.
+    """
+    parts = []
+    for key, label in _SHARE_LABELS:
+        share = breakdown.get(f"share_{key}")
+        if share is not None and np.isfinite(share):
+            parts.append(f"{label} {100.0 * share:.0f}%")
+    return " ".join(parts)
+
+
 def _diagnostics(out: dict, omega: float) -> dict:
-    """Representation-level watch numbers logged alongside the loss breakdown."""
+    """Representation-level watch numbers logged alongside the loss breakdown.
+
+    `mu_res_norm` is reported next to the gate statistics on purpose. `lam` alone is not
+    interpretable: it weights `z_prior` against `z_res = mu_res + omega * eps`, so when
+    the residual is suppressed a mean lam near 0.5 with a wide spread describes a gate
+    arbitrating between a signal and pure noise, not between two competing explanations.
+    Reading the two together is the only way to tell those apart.
+    """
     lam = out["lam"].detach()
     return {
         "omega": omega,
@@ -76,6 +101,7 @@ def _diagnostics(out: dict, omega: float) -> dict:
         "lam_std": float(lam.std()),
         "z_prior_norm": float(out["z_prior"].detach().norm(dim=-1).mean()),
         "z_res_norm": float(out["z_res"].detach().norm(dim=-1).mean()),
+        "mu_res_norm": float(out["mu_res"].detach().norm(dim=-1).mean()),
     }
 
 
@@ -148,7 +174,9 @@ def fit(
                 f"(fact {last['L_fact']:.4f} mmd {last['L_mmd']:.4f} "
                 f"rec {last['L_rec']:.4f} sparse {last['L_sparse']:.3f} "
                 f"align {last['L_align']:.4f} g {last['gamma']:.2f}) | "
-                f"lam {last['lam_mean']:.2f}+-{last['lam_std']:.2f} omega {last['omega']:.2f}"
+                f"share {format_shares(last)} | "
+                f"lam {last['lam_mean']:.2f}+-{last['lam_std']:.2f} "
+                f"|mu_res| {last['mu_res_norm']:.3f} omega {last['omega']:.2f}"
             )
 
         if not stopping:
