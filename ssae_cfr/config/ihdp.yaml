@@ -9,3 +9,8 @@ epochs: 300
 # k_svd left as auto (choose_k_svd at 90% energy); no protected covariates set
 # for the semi-synthetic benchmark.
 energy_threshold: 0.90
+# Stated explicitly even though it equals the default, because this is the value that
+# defines the reference run every later change is compared against. At 1.0 the alignment
+# term suppresses the residual branch instead of down-weighting it, so a benchmark at
+# that setting is a baseline we already know to be mis-specified.
+gamma_align: 0.0

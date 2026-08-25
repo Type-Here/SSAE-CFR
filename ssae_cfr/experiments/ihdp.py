@@ -230,6 +230,12 @@ def format_benchmark(summary: Dict[str, Dict[str, float]], n_realizations: int) 
         ("pool_smd_reduction", "SMD reduction (pool)"),
         ("out_smd_reduction", "SMD reduction (out)"),
         ("pool_z_mod_norm", "|z_mod| (pool)"),
+        # |mu_res| is meaningless alone - it is only ever "small" or "large" relative to
+        # the branch it is competing with, so |z_prior| sits directly under it. And lam
+        # is only interpretable once both are known.
+        ("train_mu_res_norm", "|mu_res| (last epoch)"),
+        ("train_z_prior_norm", "|z_prior| (last epoch)"),
+        ("train_lam_mean", "lam mean (last epoch)"),
         ("pool_ate_hat", "ATE hat (pool)"),
         ("stopped_at_epoch", "stopped at epoch"),
     ):
@@ -240,6 +246,36 @@ def format_benchmark(summary: Dict[str, Dict[str, float]], n_realizations: int) 
                 f"   median {stat['median']:.4f}"
             )
     lines.append("true ATE is 4.0 by construction; true ATT is exactly 4.0")
+    lines.append(format_loss_budget(summary))
+    return "\n".join(lines)
+
+
+def format_loss_budget(summary: Dict[str, Dict[str, float]]) -> str:
+    """What fraction of the objective each loss term commanded at the last epoch.
+
+    Printed with every benchmark because a nominal weight is not readable on its own:
+    the five terms have natural magnitudes that differ by orders of magnitude, so equal
+    weights do not mean equal influence. Averaged across realizations, since the shares
+    are dimensionless and therefore comparable across outcome scales - unlike the raw
+    term values, which are not.
+    """
+    rows = [
+        ("L_fact", "factual"),
+        ("L_mmd", "balancing (MMD)"),
+        ("L_sparse", "sparsity (L1)"),
+        ("L_rec", "reconstruction"),
+        ("L_align", "alignment"),
+    ]
+    lines = ["", "loss budget at the last epoch (share of the objective, mean over realizations):"]
+    any_row = False
+    for key, label in rows:
+        stat = summary.get(f"train_share_{key}")
+        if stat is None or not np.isfinite(stat["mean"]):
+            continue
+        any_row = True
+        lines.append(f"  {label:<22}{100.0 * stat['mean']:>7.1f}%   +- {100.0 * stat['std']:.1f}")
+    if not any_row:
+        return ""
     return "\n".join(lines)
 
 
@@ -274,6 +310,12 @@ def main(argv: Optional[List[str]] = None) -> None:
         help="weight on the MMD balancing term (overrides the config)",
     )
     parser.add_argument(
+        "--gamma-align",
+        type=float,
+        default=None,
+        help="weight on the alignment term (overrides the config; 0 = off, the default)",
+    )
+    parser.add_argument(
         "--patience",
         type=int,
         default=None,
@@ -290,6 +332,8 @@ def main(argv: Optional[List[str]] = None) -> None:
         overrides["epochs"] = args.epochs
     if args.alpha_mmd is not None:
         overrides["alpha_mmd"] = args.alpha_mmd
+    if args.gamma_align is not None:
+        overrides["gamma_align"] = args.gamma_align
     if args.patience is not None:
         overrides["patience"] = args.patience
     cfg = load_config(args.config, **overrides)
@@ -305,8 +349,9 @@ def main(argv: Optional[List[str]] = None) -> None:
         cfg, realizations, args.prior, args.val_fraction, args.seed, args.verbose
     )
     print(
-        f"alpha_mmd={cfg.alpha_mmd} epochs={cfg.epochs} k_latent={cfg.k_latent} "
-        f"patience={cfg.patience}"
+        f"alpha_mmd={cfg.alpha_mmd} gamma_align={cfg.gamma_align} "
+        f"lambda_rec={cfg.lambda_rec} beta_l1={cfg.beta_l1} "
+        f"epochs={cfg.epochs} k_latent={cfg.k_latent} patience={cfg.patience}"
     )
     print(format_benchmark(summary, len(realizations)))
 
