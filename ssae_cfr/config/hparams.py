@@ -63,7 +63,17 @@ class TrainConfig:
     alpha_mmd: float = 1.0
     beta_l1: float = 1e-3
     lambda_rec: float = 1.0
-    gamma_align: float = 1.0                 # max, reached after warm-up
+    # Default 0.0, i.e. the alignment term is OFF. It was 1.0, and at that weight it
+    # does not express a preference for documented explanations - it deletes the
+    # residual branch. Measured at the old default: ||mu_res|| = 0.083 against
+    # ||z_prior|| = 5.61, so z_mod was 98.5 percent prior branch, while the residual
+    # subspace carries about as much information about the true tau as the prior
+    # subspace does (linear R^2 0.504 vs 0.580, and complementary: 0.869 together).
+    # Turning it off wins 18/20 paired realizations on the honest validation criterion
+    # and 18/20 on SMD reduction. The preference the term was meant to express belongs
+    # in a bounded penalty on an admission decision, not in an unbounded penalty on the
+    # norm of a representation; until that exists, off is the defensible baseline.
+    gamma_align: float = 0.0                 # max, reached after warm-up
     l1_target: str = "z"                     # "z" (default) or "mu"
 
     # -- noise / SMD modulator -----------------------------------
