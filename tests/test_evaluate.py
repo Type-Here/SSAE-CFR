@@ -22,6 +22,7 @@ from ssae_cfr.evaluate import (
     _sensitivity,
     aggregate,
     factual_objective,
+    final_training_diagnostics,
     format_summary,
     score_split,
 )
@@ -282,3 +283,28 @@ def test_factual_objective_needs_no_oracle():
     """The point of this criterion: it is computable where PEHE is not."""
     ds = _dataset(oracle=False)
     assert np.isfinite(factual_objective(_model(6), ds))
+
+
+# -- training diagnostics carried into the scores ----------------------------
+
+def test_final_training_diagnostics_reads_the_last_scored_epoch():
+    history = [
+        {"share_L_fact": 0.9, "share_L_rec": 0.1, "mu_res_norm": 5.0, "epoch": 0},
+        {"share_L_fact": 0.4, "share_L_rec": 0.6, "mu_res_norm": 2.0, "epoch": 1},
+    ]
+    out = final_training_diagnostics(history)
+    assert out["train_share_L_rec"] == 0.6
+    assert out["train_mu_res_norm"] == 2.0
+
+
+def test_final_training_diagnostics_skips_the_early_stopping_record():
+    """`fit` appends a bookkeeping entry after the loop; it carries no diagnostics."""
+    history = [
+        {"share_L_fact": 0.4, "mu_res_norm": 2.0, "epoch": 1},
+        {"early_stopped_to_epoch": 1, "best_val_objective": 0.3},
+    ]
+    assert final_training_diagnostics(history)["train_share_L_fact"] == 0.4
+
+
+def test_final_training_diagnostics_of_an_empty_history_is_empty():
+    assert final_training_diagnostics([]) == {}

@@ -117,3 +117,61 @@ def test_total_loss_requires_all_terms():
     cfg = load_config(None)
     with pytest.raises(KeyError):
         total_loss({"L_fact": torch.tensor(1.0)}, cfg, epoch=0)
+
+
+# -- loss shares -------------------------------------------------------------
+
+def _shares_terms():
+    return {
+        "L_fact": torch.tensor(1.0),
+        "L_mmd": torch.tensor(0.5),
+        "L_sparse": torch.tensor(4.0),
+        "L_rec": torch.tensor(2.0),
+        "L_align": torch.tensor(10.0),
+    }
+
+
+def test_shares_are_weighted_and_sum_to_one():
+    cfg = load_config(None, alpha_mmd=2.0, beta_l1=0.1, lambda_rec=3.0, gamma_align=1.0,
+                      gamma_warmup=0)
+    _, bd = total_loss(_shares_terms(), cfg, epoch=0)
+    weighted = {"L_fact": 1.0, "L_mmd": 1.0, "L_sparse": 0.4, "L_rec": 6.0, "L_align": 10.0}
+    budget = sum(weighted.values())
+    for name, value in weighted.items():
+        assert bd[f"w_{name}"] == pytest.approx(value)
+        assert bd[f"share_{name}"] == pytest.approx(value / budget)
+    assert sum(bd[f"share_{n}"] for n in weighted) == pytest.approx(1.0)
+
+
+def test_share_follows_the_weight_not_the_raw_value():
+    """The point of the shares: a large term at a tiny weight is a small share."""
+    cfg = load_config(None, alpha_mmd=1.0, beta_l1=1e-6, lambda_rec=1.0, gamma_align=0.0)
+    _, bd = total_loss(_shares_terms(), cfg, epoch=0)
+    assert bd["L_sparse"] == pytest.approx(4.0)          # the largest raw value but one
+    assert bd["share_L_sparse"] < 1e-5                   # and effectively absent
+
+
+def test_share_of_a_zero_weight_term_is_zero():
+    cfg = load_config(None, gamma_align=0.0)
+    _, bd = total_loss(_shares_terms(), cfg, epoch=100)
+    assert bd["gamma"] == 0.0
+    assert bd["share_L_align"] == 0.0
+
+
+def test_shares_stay_a_budget_when_mmd_is_negative():
+    """The biased MMD estimator can go slightly negative; shares must stay in [0, 1]."""
+    cfg = load_config(None, alpha_mmd=1.0, beta_l1=0.0, lambda_rec=1.0, gamma_align=0.0)
+    terms = _shares_terms()
+    terms["L_mmd"] = torch.tensor(-0.02)
+    _, bd = total_loss(terms, cfg, epoch=0)
+    assert bd["share_L_mmd"] < 0.0                       # sign is preserved
+    assert sum(abs(bd[f"share_{n}"]) for n in _shares_terms()) == pytest.approx(1.0)
+
+
+def test_format_shares_renders_percentages():
+    from ssae_cfr.train import format_shares
+
+    cfg = load_config(None, alpha_mmd=0.0, beta_l1=0.0, lambda_rec=1.0, gamma_align=0.0)
+    _, bd = total_loss(_shares_terms(), cfg, epoch=0)
+    rendered = format_shares(bd)
+    assert "fac 33%" in rendered and "rec 67%" in rendered
