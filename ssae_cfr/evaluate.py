@@ -156,6 +156,32 @@ def factual_objective(model: SSAECFR, ds: Dataset, normalized: bool = False) -> 
     return mse / (y_scale ** 2) if y_scale > 0.0 else float("nan")
 
 
+_FINAL_DIAGNOSTIC_KEYS = (
+    "share_L_fact", "share_L_mmd", "share_L_sparse", "share_L_rec", "share_L_align",
+    "L_total", "mu_res_norm", "z_prior_norm", "lam_mean", "lam_std", "omega",
+)
+
+
+def final_training_diagnostics(history: Sequence[Dict[str, float]]) -> Dict[str, float]:
+    """The last training epoch's loss shares and representation norms, as score keys.
+
+    Carried out of `fit` so a benchmark summary can report what the optimizer was
+    actually working on, aggregated across realizations, rather than only what the model
+    scored. The shares in particular are the number that decides whether a weight is
+    doing anything: a term at 1.4 percent of the objective is off whatever its nominal
+    weight says. Keys are prefixed `train_` since they describe the fit, not a split.
+
+    History entries appended after the loop (the early-stopping record) carry none of
+    these keys, so the last entry that does is the one read. With early stopping on, that
+    is the epoch training stopped at, not the epoch the weights were rewound to - one
+    more reason the stopping path is off for reported numbers.
+    """
+    for entry in reversed(list(history)):
+        if "share_L_fact" in entry:
+            return {f"train_{k}": entry[k] for k in _FINAL_DIAGNOSTIC_KEYS if k in entry}
+    return {}
+
+
 def _bootstrap_ci(
     statistic: Callable[[np.ndarray], float],
     n: int,
@@ -326,6 +352,7 @@ def fit_and_score(
             )
     scores["treated_fraction_train"] = treated_fraction(train) or float("nan")
     scores["treated_fraction_test"] = treated_fraction(test) or float("nan")
+    scores.update(final_training_diagnostics(history))
     # How long training actually ran, so a summary can show whether early stopping bit
     # and where. Without it a stopped run is indistinguishable from a short one.
     if history and "early_stopped_to_epoch" in history[-1]:
