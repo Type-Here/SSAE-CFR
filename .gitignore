@@ -239,3 +239,5 @@ artifacts/*
 
 /*.md
 !/README.md
+
+results/
