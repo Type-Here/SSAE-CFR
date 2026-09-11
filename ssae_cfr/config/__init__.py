@@ -6,6 +6,6 @@
 See :mod:`ssae_cfr.config.hparams`.
 """
 
-from .hparams import TrainConfig, load_config
+from .hparams import B_MODES, NOISE_SCALES, TrainConfig, load_config
 
-__all__ = ["TrainConfig", "load_config"]
+__all__ = ["TrainConfig", "load_config", "B_MODES", "NOISE_SCALES"]

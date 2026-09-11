@@ -2,7 +2,7 @@
 
 `standardize` (train-fit median-impute + z-score, applied before the prior
 projection); `smd` (the detached noise modulator); `metrics` (PEHE, eps_ATE, policy
-risk, E-value, SMD reduction); `schedules` (alignment warm-up).
+risk, E-value, SMD reduction); `schedules` (the preference warm-up).
 """
 
 from .metrics import (
@@ -18,7 +18,7 @@ from .metrics import (
     policy_value,
     smd_reduction,
 )
-from .schedules import gamma_warmup
+from .schedules import linear_warmup
 from .smd import omega_from_smd, smd_per_covariate
 from .standardize import Standardizer, standardize_dataset
 
@@ -27,7 +27,7 @@ __all__ = [
     "standardize_dataset",
     "omega_from_smd",
     "smd_per_covariate",
-    "gamma_warmup",
+    "linear_warmup",
     "pehe",
     "pehe_against_zero",
     "eps_ate",
