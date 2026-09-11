@@ -1,21 +1,28 @@
 """The full SSAE-CFR model (v1, Variant A).
 
-One forward pass runs three encodings through the single shared encoder:
+One forward pass, one encoding, one code:
 
-    x        --> encode --> mu_enc, z_enc --> decode --> x_hat      (L_rec, L_sparse)
-    P_U x    --> encode --> z_prior                                 (gating)
-    (I-P_U)x --> encode --> mu_res, z_res                           (L_align, gating)
+    x --> P_U split --> x_mod = P_U x + b(x) * (I - P_U) x          (L_pref on b)
+    x_mod --> encode --> mu, z                                      (L_sparse)
+    z     --> decode --> x_hat, reconstructing the WHOLE x          (L_rec)
+    z     --> h0, h1 --> y0_hat, y1_hat --> yf_hat                  (L_fact)
+    z | t             --> MMD                                       (L_mmd)
 
-then gates the prior/residual codes into z_mod, and reads the two outcome heads off it:
-
-    z_mod --> h0, h1 --> y0_hat, y1_hat --> yf_hat                  (L_fact)
-    z_mod | t         --> MMD                                       (L_mmd)
-
-`forward` returns every raw piece (predictions, reconstruction, codes, gate, diagnostics)
+`forward` returns every raw piece (predictions, reconstruction, code, gate, diagnostics)
 without collapsing anything into a loss, so the caller stays in control. `loss_terms`
-turns those pieces into the five scalar terms `total_loss` expects. The plain
-reconstruction pass encodes the *whole* x (not a decomposed half): it is what keeps the
-code informative and gives the L1 sparsity something to compress, given there is no KL.
+turns those pieces into the five scalar terms `total_loss` expects.
+
+The reconstruction target is `x`, not `x_mod`. That is what makes the design work: the
+decoder has to rebuild the whole covariate vector from a code built out of an admitted
+fraction of it, so `L_rec` pushes `b` toward 1 while `L_pref` pushes it toward 0, and the
+balance between `lambda_rec` and `gamma_pref` is what decides `b`. The reconstruction is
+no longer a regularizer that keeps the code informative in the absence of a KL - it is
+the force that opens the gate, which is why its weight is a first-class tuning target.
+
+A single code also closes a split the previous version carried: the reconstruction used
+to run over its own encoding of the whole x while the heads and the MMD read a different,
+gated code, so the autoencoder half of the model and the counterfactual-regression half
+shared nothing but encoder weights.
 
 Outcome scale: with a binary outcome the factual loss is BCE-with-logits, so the heads
 emit logits and the sigmoid lives in the loss, not in the model. Anything that reads a
@@ -46,7 +53,7 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
 
-from ..losses import align_loss, factual_loss, mmd_rbf
+from ..losses import factual_loss, mmd_rbf, preference_loss
 from .heads import OutcomeHeads
 from .pgag import PGAG
 from .ssae import Decoder, Encoder
@@ -112,19 +119,23 @@ class SSAECFR(nn.Module):
         self.register_buffer("y_loc", torch.tensor(float(y_loc)))
         self.register_buffer("y_scale", torch.tensor(float(y_scale)))
 
-        self.encoder = Encoder(m, cfg.encoder_hidden, cfg.k_latent, cfg.activation, cfg.batchnorm)
+        self.encoder = Encoder(
+            m, cfg.encoder_hidden, cfg.k_latent, cfg.activation, cfg.batchnorm, cfg.noise_scale
+        )
         self.decoder = Decoder(cfg.k_latent, cfg.decoder_hidden, m, cfg.activation, cfg.batchnorm)
-        self.pgag = PGAG(self.encoder, P_U, cfg.gating_hidden, cfg.activation, cfg.batchnorm)
+        self.pgag = PGAG(
+            self.encoder, P_U, cfg.gating_hidden, cfg.activation, cfg.batchnorm, cfg.b_mode
+        )
         self.heads = OutcomeHeads(cfg.k_latent, cfg.head_hidden, cfg.activation, cfg.batchnorm)
 
     def forward(self, x: Tensor, t: Tensor, omega: float = 0.0) -> Dict[str, Tensor]:
-        # reconstruction pass over the whole x (shared encoder)
-        mu_enc, z_enc = self.encoder.encode(x, omega)
-        x_hat = self.decoder(z_enc)
-
-        # prior/residual decomposition + gating
+        # prior/residual decomposition + admission gate + the single encoding
         pg = self.pgag(x, omega)
-        y0_hat, y1_hat = self.heads(pg.z_mod)
+        # the target is the whole x, not the gated x_mod: that is what makes L_rec push
+        # the gate open, and what makes the code carry more than the admitted part
+        x_hat = self.decoder(pg.z)
+
+        y0_hat, y1_hat = self.heads(pg.z)
         tf = t.to(y1_hat.dtype)
         yf_hat = tf * y1_hat + (1.0 - tf) * y0_hat
 
@@ -133,13 +144,11 @@ class SSAECFR(nn.Module):
             "y1_hat": y1_hat,
             "yf_hat": yf_hat,
             "x_hat": x_hat,
-            "mu_enc": mu_enc,
-            "z_enc": z_enc,
-            "z_mod": pg.z_mod,
-            "lam": pg.lam,
-            "mu_res": pg.mu_res,
-            "z_prior": pg.z_prior,
-            "z_res": pg.z_res,
+            "mu": pg.mu,
+            "z": pg.z,
+            "b": pg.b,
+            "x_mod": pg.x_mod,
+            "x_res": pg.x_res,
         }
 
     def loss_terms(
@@ -155,17 +164,17 @@ class SSAECFR(nn.Module):
         `outcome_type` defaults to the model's own; pass it only to override.
         """
         outcome_type = outcome_type or self.outcome_type
-        code = out["z_enc"] if self.l1_target == "z" else out["mu_enc"]
+        code = out["z"] if self.l1_target == "z" else out["mu"]
         # The heads live on the standardized outcome, so the target is standardized to
         # meet them; `to_outcome_scale` is the inverse, applied on the way out.
         if outcome_type != "binary":
             yf = (yf - self.y_loc) / self.y_scale
         return {
             "L_fact": factual_loss(out["y0_hat"], out["y1_hat"], t, yf, outcome_type),
-            "L_mmd": mmd_rbf(out["z_mod"], t),
+            "L_mmd": mmd_rbf(out["z"], t),
             "L_sparse": code.abs().sum(dim=-1).mean(),
             "L_rec": F.mse_loss(out["x_hat"], x),
-            "L_align": align_loss(out["mu_res"]),
+            "L_pref": preference_loss(out["b"]),
         }
 
     @torch.no_grad()
