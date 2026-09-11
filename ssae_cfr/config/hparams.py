@@ -31,6 +31,12 @@ from typing import Any, Mapping, Optional, Sequence, Union
 
 import yaml
 
+# Defined here rather than in the modules that consume them: `config` is the leaf every
+# other package imports, so this is the one direction that cannot produce a cycle, and it
+# keeps the accepted values and the field that carries them in the same file.
+B_MODES = ("learned", "one", "zero")
+NOISE_SCALES = ("absolute", "relative")
+
 
 @dataclass
 class TrainConfig:
@@ -45,10 +51,15 @@ class TrainConfig:
     k_latent: int = 32                       # encoder bottleneck
     encoder_hidden: Sequence[int] = (64,)    # m -> 64 -> k_latent
     decoder_hidden: Sequence[int] = (64,)    # k_latent -> 64 -> m
-    head_hidden: Sequence[int] = (32,)       # z_mod -> 32 -> 1   (h0, h1)
-    gating_hidden: Sequence[int] = (32,)     # concat(z_prior,z_res) -> 32 -> k_latent
+    head_hidden: Sequence[int] = (32,)       # z -> 32 -> 1   (h0, h1)
+    gating_hidden: Sequence[int] = (32,)     # x -> 32 -> m   (the admission gate b)
     activation: str = "elu"
     batchnorm: bool = False
+    # "learned" gates the residual per covariate and per patient. The two constants are
+    # the model's own ablations, on the same architecture and the same weights: "one"
+    # admits the whole residual, so x_mod == x and this is the model WITHOUT a prior;
+    # "zero" admits none of it, so x_mod == P_U x, the prior-only model.
+    b_mode: str = "learned"                  # "learned" | "one" | "zero"
 
     # -- prior / P_U rank selection (choose_k_svd) -------------
     k_svd: Optional[int] = None              # None => choose automatically
@@ -61,27 +72,36 @@ class TrainConfig:
 
     # -- loss weights --------------------------------------------
     alpha_mmd: float = 1.0
-    beta_l1: float = 1e-3
+    # `lambda_rec` is no longer a regularization detail. The decoder rebuilds the whole
+    # x from a code built out of the admitted part of it, so L_rec pushes `b` toward 1
+    # while L_pref pushes it toward 0: the ratio of these two weights is the mechanism
+    # that decides the gate. Tuning it is its own step, on the new architecture.
     lambda_rec: float = 1.0
-    # Default 0.0, i.e. the alignment term is OFF. It was 1.0, and at that weight it
-    # does not express a preference for documented explanations - it deletes the
-    # residual branch. Measured at the old default: ||mu_res|| = 0.083 against
-    # ||z_prior|| = 5.61, so z_mod was 98.5 percent prior branch, while the residual
-    # subspace carries about as much information about the true tau as the prior
-    # subspace does (linear R^2 0.504 vs 0.580, and complementary: 0.869 together).
-    # Turning it off wins 18/20 paired realizations on the honest validation criterion
-    # and 18/20 on SMD reduction. The preference the term was meant to express belongs
-    # in a bounded penalty on an admission decision, not in an unbounded penalty on the
-    # norm of a representation; until that exists, off is the defensible baseline.
-    gamma_align: float = 0.0                 # max, reached after warm-up
+    # SET AT 0.0, NOT SETTLED. The L1 "sparsity" for now disabled. 
+    # Raised to 1e-1 it collapses the representation (||z_prior||
+    # 5.83 -> 1.37, SMD reduction 0.375 -> 0.148, on 0/20 realizations) - the
+    # balance-by-collapse, not concept separation. Concept separation needs an
+    # overcomplete dictionary; k_latent = 32 against m = 25 is a bottleneck, where an L1
+    # can only discard coordinates, not separate them.
+    beta_l1: float = 0.0
+    # The preference for documented explanations, as a bounded penalty on the admission
+    # gate: L_pref = mean_j b_j, which since b >= 0 is ||b||_1 / m. It replaces
+    # gamma_align, whose penalty on ||mu_res||^2 was unbounded and, measured, deleted the
+    # residual branch rather than down-weighting it.
+    gamma_pref: float = 1.0                  # max, reached after warm-up
     l1_target: str = "z"                     # "z" (default) or "mu"
 
     # -- noise / SMD modulator -----------------------------------
     noise_dist: str = "gaussian"             # v1 = gaussian; laplace variants are v2
     alpha_smd: float = 2.0                   # omega = tanh(alpha_smd * SMD)
+    # "absolute" is z = mu + omega*eps, which the encoder escapes by inflating the
+    # signal; "relative" scales the noise by ||mu||_detached/sqrt(k_latent) so the
+    # noise-to-signal ratio is omega whatever the scale of mu. Default "absolute"
+    # to keep metrics comparable to previous version
+    noise_scale: str = "absolute"            # "absolute" | "relative"
 
     # -- schedule / optimisation ---------------------------------
-    gamma_warmup: int = 30                   # epochs, linear 0 -> gamma_align
+    gamma_warmup: int = 30                   # epochs, linear 0 -> gamma_pref
     epochs: int = 300
     optimizer: str = "adam"
     lr: float = 1e-3
@@ -111,6 +131,10 @@ class TrainConfig:
             raise ValueError(f"l1_target must be 'z' or 'mu'; got {self.l1_target!r}")
         if self.noise_dist not in ("gaussian", "laplace", "laplace_directional"):
             raise ValueError(f"unknown noise_dist {self.noise_dist!r}")
+        if self.noise_scale not in NOISE_SCALES:
+            raise ValueError(f"noise_scale must be one of {NOISE_SCALES}; got {self.noise_scale!r}")
+        if self.b_mode not in B_MODES:
+            raise ValueError(f"b_mode must be one of {B_MODES}; got {self.b_mode!r}")
         if self.optimizer not in ("adam", "adamw", "sgd"):
             raise ValueError(f"unknown optimizer {self.optimizer!r}")
         if not (0.0 < self.energy_threshold <= 1.0):
