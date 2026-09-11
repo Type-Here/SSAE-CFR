@@ -5,7 +5,7 @@
       + alpha_mmd  * L_mmd
       + beta_l1    * L_sparse
       + lambda_rec * L_rec
-      + gamma      * L_align
+      + gamma      * L_pref
 
 Weights come from the TrainConfig; the gamma schedule from `utils.schedules`. Returns the
 scalar total plus a breakdown dict (each term's raw scalar value, its weighted value, its
@@ -34,12 +34,12 @@ from typing import Mapping, Tuple, TYPE_CHECKING
 
 from torch import Tensor
 
-from ..utils.schedules import gamma_warmup
+from ..utils.schedules import linear_warmup
 
 if TYPE_CHECKING:
     from ..config import TrainConfig
 
-_REQUIRED = ("L_fact", "L_mmd", "L_sparse", "L_rec", "L_align")
+_REQUIRED = ("L_fact", "L_mmd", "L_sparse", "L_rec", "L_pref")
 
 
 def total_loss(
@@ -52,13 +52,13 @@ def total_loss(
     if missing:
         raise KeyError(f"total_loss missing terms: {missing}")
 
-    gamma = gamma_warmup(epoch, cfg.gamma_align, cfg.gamma_warmup)
+    gamma = linear_warmup(epoch, cfg.gamma_pref, cfg.gamma_warmup)
     weights = {
         "L_fact": 1.0,
         "L_mmd": cfg.alpha_mmd,
         "L_sparse": cfg.beta_l1,
         "L_rec": cfg.lambda_rec,
-        "L_align": gamma,
+        "L_pref": gamma,
     }
 
     total = (
@@ -66,7 +66,7 @@ def total_loss(
         + weights["L_mmd"] * terms["L_mmd"]
         + weights["L_sparse"] * terms["L_sparse"]
         + weights["L_rec"] * terms["L_rec"]
-        + weights["L_align"] * terms["L_align"]
+        + weights["L_pref"] * terms["L_pref"]
     )
 
     breakdown = {"L_total": float(total.detach()), "gamma": gamma}
