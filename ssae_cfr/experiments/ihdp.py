@@ -37,8 +37,8 @@ the surface described here, which is worth stating explicitly in any write-up.
 The imbalance is also simulated, and in a way that matters for this project: the
 treated units whose mother was not white were deleted from the original trial, and
 maternal race is *not* among the 25 covariates. IHDP therefore has a deliberate,
-documented hidden confounder - the exact failure mode the semantic prior and L_align
-are meant to guard against.
+documented hidden confounder - the exact failure mode the semantic prior is meant to
+guard against.
 """
 
 from __future__ import annotations
@@ -50,8 +50,10 @@ from typing import Dict, List, Optional, Sequence, Tuple
 import numpy as np
 import torch
 
-from ..config import TrainConfig, load_config
+from ..config import B_MODES, NOISE_SCALES, TrainConfig, load_config
 from ..data import Dataset, N_REALIZATIONS, has_replication_set, load_ihdp_realization
+from ..data.ihdp import FEATURE_NAMES
+from ..prior import load_projector, retention
 from ..evaluate import aggregate, factual_objective, fit_and_score, score_split
 from ..utils.split import train_val_test_indices
 from ..utils.standardize import standardize_dataset
@@ -229,13 +231,14 @@ def format_benchmark(summary: Dict[str, Dict[str, float]], n_realizations: int) 
         ("val_factual_objective_normalized", "val factual MSE (norm)"),
         ("pool_smd_reduction", "SMD reduction (pool)"),
         ("out_smd_reduction", "SMD reduction (out)"),
-        ("pool_z_mod_norm", "|z_mod| (pool)"),
-        # |mu_res| is meaningless alone - it is only ever "small" or "large" relative to
-        # the branch it is competing with, so |z_prior| sits directly under it. And lam
-        # is only interpretable once both are known.
-        ("train_mu_res_norm", "|mu_res| (last epoch)"),
-        ("train_z_prior_norm", "|z_prior| (last epoch)"),
-        ("train_lam_mean", "lam mean (last epoch)"),
+        ("pool_z_norm", "|z| (pool)"),
+        # b_mean alone cannot distinguish a per-patient decision from a gate that has
+        # collapsed to one uniform value, so the per-patient spread sits under it, and
+        # the admitted fraction of residual energy under that - a high mean admission
+        # spent on covariates carrying little residual admits little.
+        ("pool_b_mean", "b mean (pool)"),
+        ("pool_b_patient_std", "b per-patient sd (pool)"),
+        ("pool_residual_admitted", "residual admitted (pool)"),
         ("pool_ate_hat", "ATE hat (pool)"),
         ("stopped_at_epoch", "stopped at epoch"),
     ):
@@ -264,7 +267,7 @@ def format_loss_budget(summary: Dict[str, Dict[str, float]]) -> str:
         ("L_mmd", "balancing (MMD)"),
         ("L_sparse", "sparsity (L1)"),
         ("L_rec", "reconstruction"),
-        ("L_align", "alignment"),
+        ("L_pref", "preference (L_pref)"),
     ]
     lines = ["", "loss budget at the last epoch (share of the objective, mean over realizations):"]
     any_row = False
@@ -276,6 +279,46 @@ def format_loss_budget(summary: Dict[str, Dict[str, float]]) -> str:
         lines.append(f"  {label:<22}{100.0 * stat['mean']:>7.1f}%   +- {100.0 * stat['std']:.1f}")
     if not any_row:
         return ""
+    return "\n".join(lines)
+
+
+def format_admission_table(
+    summary: Dict[str, Dict[str, float]],
+    feature_names: Sequence[str],
+    retention_j: Optional[np.ndarray] = None,
+    scope: str = "pool",
+) -> str:
+    """Mean admission per covariate, next to what the prior claimed to keep of it.
+
+    This is the readable output of the decomposition. `b_j` is what the model asked back
+    from the residual of covariate j; `retention_j = diag(P_U)_j` is the fraction of that
+    covariate the prior kept in the first place. A covariate with low retention and high
+    admission is one the truncation discarded and the model needed anyway - the direct,
+    per-covariate reading of whether the SVD cut in the right place. Sorted by admission,
+    so the covariates the prior serves worst come first.
+
+    Read on the `pool` scope by default: all 672 training units, so the table describes
+    the data the gate was fit on rather than the 75 test units.
+    """
+    rows = []
+    for j, name in enumerate(feature_names):
+        stat = summary.get(f"{scope}_b_cov_{j:02d}")
+        if stat is None or not np.isfinite(stat["mean"]):
+            continue
+        keep = float(retention_j[j]) if retention_j is not None else float("nan")
+        rows.append((stat["mean"], name, keep))
+    if not rows:
+        return ""
+
+    lines = [
+        "",
+        f"admission per covariate ({scope}: mean b_j over units and realizations), "
+        "highest first:",
+        f"  {'covariate':<12}{'b_j':>8}{'retention_j':>14}",
+    ]
+    for value, name, keep in sorted(rows, reverse=True):
+        keep_str = f"{keep:.3f}" if np.isfinite(keep) else "-"
+        lines.append(f"  {name:<12}{value:>8.3f}{keep_str:>14}")
     return "\n".join(lines)
 
 
@@ -310,10 +353,30 @@ def main(argv: Optional[List[str]] = None) -> None:
         help="weight on the MMD balancing term (overrides the config)",
     )
     parser.add_argument(
-        "--gamma-align",
+        "--gamma-pref",
         type=float,
         default=None,
-        help="weight on the alignment term (overrides the config; 0 = off, the default)",
+        help="weight on the preference term L_pref = mean_j b_j (overrides the config)",
+    )
+    parser.add_argument(
+        "--lambda-rec",
+        type=float,
+        default=None,
+        help="weight on the reconstruction; with --gamma-pref this ratio decides b",
+    )
+    parser.add_argument("--beta-l1", type=float, default=None, help="weight on the L1 term")
+    parser.add_argument(
+        "--b-mode",
+        choices=B_MODES,
+        default=None,
+        help="'learned' gates the residual; 'one' is the model WITHOUT a prior "
+             "(x_mod == x) and 'zero' the prior-only model - the nested ablations",
+    )
+    parser.add_argument(
+        "--noise-scale",
+        choices=NOISE_SCALES,
+        default=None,
+        help="'absolute' (default) or 'relative', which scales the noise by ||mu||",
     )
     parser.add_argument(
         "--patience",
@@ -332,8 +395,10 @@ def main(argv: Optional[List[str]] = None) -> None:
         overrides["epochs"] = args.epochs
     if args.alpha_mmd is not None:
         overrides["alpha_mmd"] = args.alpha_mmd
-    if args.gamma_align is not None:
-        overrides["gamma_align"] = args.gamma_align
+    for name in ("gamma_pref", "lambda_rec", "beta_l1", "b_mode", "noise_scale"):
+        value = getattr(args, name)
+        if value is not None:
+            overrides[name] = value
     if args.patience is not None:
         overrides["patience"] = args.patience
     cfg = load_config(args.config, **overrides)
@@ -349,11 +414,15 @@ def main(argv: Optional[List[str]] = None) -> None:
         cfg, realizations, args.prior, args.val_fraction, args.seed, args.verbose
     )
     print(
-        f"alpha_mmd={cfg.alpha_mmd} gamma_align={cfg.gamma_align} "
+        f"alpha_mmd={cfg.alpha_mmd} gamma_pref={cfg.gamma_pref} "
         f"lambda_rec={cfg.lambda_rec} beta_l1={cfg.beta_l1} "
+        f"b_mode={cfg.b_mode} noise_scale={cfg.noise_scale} "
         f"epochs={cfg.epochs} k_latent={cfg.k_latent} patience={cfg.patience}"
     )
     print(format_benchmark(summary, len(realizations)))
+
+    retention_j = retention(load_projector(args.prior)[0]) if args.prior else None
+    print(format_admission_table(summary, FEATURE_NAMES, retention_j))
 
     if args.json_out is not None:
         payload = {
