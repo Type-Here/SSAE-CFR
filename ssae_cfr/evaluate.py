@@ -16,8 +16,11 @@ What each dataset supports:
   diur_v1          no oracle at all -> balance, policy risk against the constant
   sepsis_v2        policies, and an E-value for how much confounding would undo it.
 
-Balance (SMD reduction from x to z_mod) and the E-value are computed everywhere, since
-neither needs an oracle.
+Balance (SMD reduction from x to the code z) and the E-value are computed everywhere,
+since neither needs an oracle. So are the admission-gate diagnostics: `b_mean` with its
+per-patient spread, the fraction of residual energy admitted, and the per-covariate
+`b_cov_*` keys. Those describe what the model asked back from the part of each covariate
+the prior does not name, which is the project's own question rather than a benchmark's.
 
 Two scale details worth knowing before reading any output. First, for a binary outcome
 the heads emit logits, so the causal contrast is taken on the probability scale here
@@ -46,7 +49,7 @@ from .data import (
 )
 from .models import SSAECFR
 from .models.ssae_cfr import to_outcome_scale
-from .train import build_projector_for, fit, load_prior_for
+from .train import admission_diagnostics, build_projector_for, fit, load_prior_for
 from .utils.metrics import (
     approximate_risk_ratio,
     approximate_risk_ratio_ci,
@@ -157,8 +160,8 @@ def factual_objective(model: SSAECFR, ds: Dataset, normalized: bool = False) -> 
 
 
 _FINAL_DIAGNOSTIC_KEYS = (
-    "share_L_fact", "share_L_mmd", "share_L_sparse", "share_L_rec", "share_L_align",
-    "L_total", "mu_res_norm", "z_prior_norm", "lam_mean", "lam_std", "omega",
+    "share_L_fact", "share_L_mmd", "share_L_sparse", "share_L_rec", "share_L_pref",
+    "L_total", "b_mean", "b_std", "b_patient_std", "residual_admitted", "z_norm", "omega",
 )
 
 
@@ -254,14 +257,21 @@ def score_split(model: SSAECFR, ds: Dataset, benefit: bool, seed: int = 0) -> Di
         "n": float(ds.n),
         "ate_hat": float(tau_hat.mean()),
         "tau_sd": float(tau_hat.std()),
-        "smd_reduction": smd_reduction(ds.x, out["z_mod"], ds.t),
-        "lam_mean": float(np.mean(out["lam"])),
-        "lam_std": float(np.std(out["lam"])),
+        "smd_reduction": smd_reduction(ds.x, out["z"], ds.t),
         # Guard against balance-by-collapse: a representation can be made perfectly
         # balanced by shrinking it to zero, which scores well on smd_reduction and
         # carries no information. Read the two together, never smd_reduction alone.
-        "z_mod_norm": float(np.linalg.norm(out["z_mod"], axis=-1).mean()),
+        "z_norm": float(np.linalg.norm(out["z"], axis=-1).mean()),
     }
+    scores.update(
+        admission_diagnostics(torch.as_tensor(out["b"]), torch.as_tensor(out["x_res"]))
+    )
+    # Per-covariate admission, as flat scalars so `aggregate` averages them across runs
+    # with no special case. A systematically high b_j says the prior is unreliable for
+    # covariate j - the model had to re-admit its residual - and is read against
+    # diag(P_U)_j, which is what the prior claimed to keep of it.
+    for j, value in enumerate(np.asarray(out["b"]).mean(axis=0)):
+        scores[f"b_cov_{j:02d}"] = float(value)
 
     if ds.has_oracle:
         tau_true = ds.tau_true

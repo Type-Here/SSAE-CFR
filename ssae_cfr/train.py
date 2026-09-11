@@ -15,6 +15,7 @@ from typing import List, Optional, Tuple
 
 import numpy as np
 import torch
+from torch import Tensor
 
 from .config import TrainConfig, load_config
 from .data import load_ihdp
@@ -68,7 +69,7 @@ def _make_optimizer(model: torch.nn.Module, cfg: TrainConfig) -> torch.optim.Opt
 
 
 _SHARE_LABELS = (("L_fact", "fac"), ("L_mmd", "mmd"), ("L_sparse", "spa"),
-                 ("L_rec", "rec"), ("L_align", "ali"))
+                 ("L_rec", "rec"), ("L_pref", "pre"))
 
 
 def format_shares(breakdown: dict) -> str:
@@ -85,24 +86,37 @@ def format_shares(breakdown: dict) -> str:
     return " ".join(parts)
 
 
-def _diagnostics(out: dict, omega: float) -> dict:
-    """Representation-level watch numbers logged alongside the loss breakdown.
+def admission_diagnostics(b: Tensor, x_res: Tensor) -> dict:
+    """How the admission gate is behaving, as four scalars.
 
-    `mu_res_norm` is reported next to the gate statistics on purpose. `lam` alone is not
-    interpretable: it weights `z_prior` against `z_res = mu_res + omega * eps`, so when
-    the residual is suppressed a mean lam near 0.5 with a wide spread describes a gate
-    arbitrating between a signal and pure noise, not between two competing explanations.
-    Reading the two together is the only way to tell those apart.
+    `b_mean` alone cannot tell a gate that decides per patient from one that has
+    collapsed to a single uniform value, which is the declared risk of this design. So
+    `b_patient_std` - the spread across patients of each patient's mean admission - is
+    reported beside it: near zero means every patient gets the same decision, however
+    interesting `b_mean` looks.
+
+    `residual_admitted` is the fraction of residual energy actually let through,
+    ||b * x_res|| / ||x_res||. It differs from `b_mean` because `b` is weighted by how
+    much residual each covariate carries: a high mean admission spent on covariates with
+    almost no residual admits almost nothing.
     """
-    lam = out["lam"].detach()
+    b = b.detach()
+    admitted = (b * x_res.detach()).norm()
+    residual = x_res.detach().norm()
     return {
-        "omega": omega,
-        "lam_mean": float(lam.mean()),
-        "lam_std": float(lam.std()),
-        "z_prior_norm": float(out["z_prior"].detach().norm(dim=-1).mean()),
-        "z_res_norm": float(out["z_res"].detach().norm(dim=-1).mean()),
-        "mu_res_norm": float(out["mu_res"].detach().norm(dim=-1).mean()),
+        "b_mean": float(b.mean()),
+        "b_std": float(b.std()),
+        "b_patient_std": float(b.mean(dim=-1).std()) if b.shape[0] > 1 else 0.0,
+        "residual_admitted": float(admitted / residual) if float(residual) > 0.0 else 0.0,
     }
+
+
+def _diagnostics(out: dict, omega: float) -> dict:
+    """Representation-level watch numbers logged alongside the loss breakdown."""
+    diag = admission_diagnostics(out["b"], out["x_res"])
+    diag["omega"] = omega
+    diag["z_norm"] = float(out["z"].detach().norm(dim=-1).mean())
+    return diag
 
 
 def fit(
@@ -173,10 +187,11 @@ def fit(
                 f"epoch {epoch:4d} | L {last['L_total']:.4f} "
                 f"(fact {last['L_fact']:.4f} mmd {last['L_mmd']:.4f} "
                 f"rec {last['L_rec']:.4f} sparse {last['L_sparse']:.3f} "
-                f"align {last['L_align']:.4f} g {last['gamma']:.2f}) | "
+                f"pref {last['L_pref']:.4f} g {last['gamma']:.2f}) | "
                 f"share {format_shares(last)} | "
-                f"lam {last['lam_mean']:.2f}+-{last['lam_std']:.2f} "
-                f"|mu_res| {last['mu_res_norm']:.3f} omega {last['omega']:.2f}"
+                f"b {last['b_mean']:.2f}+-{last['b_std']:.2f} "
+                f"(pt sd {last['b_patient_std']:.3f}) "
+                f"adm {last['residual_admitted']:.2f} omega {last['omega']:.2f}"
             )
 
         if not stopping:
