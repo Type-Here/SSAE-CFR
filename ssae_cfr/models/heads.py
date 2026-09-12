@@ -1,6 +1,6 @@
-"""TARNet-style outcome heads h0, h1 over the balanced code z_mod.
+"""TARNet-style outcome heads h0, h1 over the balanced code z.
 
-    y0_hat, y1_hat = h0(z_mod), h1(z_mod)
+    y0_hat, y1_hat = h0(z), h1(z)
     yf_hat = t * y1_hat + (1 - t) * y0_hat
 
 Two *independent* feed-forward heads, one per treatment arm. Keeping them separate
@@ -21,7 +21,7 @@ from .ssae import build_mlp
 
 
 class OutcomeHeads(nn.Module):
-    """Two independent heads mapping z_mod (R^{k_latent}) to the two potential outcomes."""
+    """Two independent heads mapping z (R^{k_latent}) to the two potential outcomes."""
 
     def __init__(
         self,
@@ -34,8 +34,8 @@ class OutcomeHeads(nn.Module):
         self.h0 = build_mlp(k_latent, hidden, 1, activation, batchnorm)
         self.h1 = build_mlp(k_latent, hidden, 1, activation, batchnorm)
 
-    def forward(self, z_mod: Tensor) -> Tuple[Tensor, Tensor]:
+    def forward(self, z: Tensor) -> Tuple[Tensor, Tensor]:
         """Return (y0_hat, y1_hat), each shape (n,)."""
-        y0 = self.h0(z_mod).squeeze(-1)
-        y1 = self.h1(z_mod).squeeze(-1)
+        y0 = self.h0(z).squeeze(-1)
+        y1 = self.h1(z).squeeze(-1)
         return y0, y1

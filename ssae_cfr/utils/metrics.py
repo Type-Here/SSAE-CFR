@@ -40,7 +40,7 @@ Sensitivity (observational data, where ignorability is the thing in doubt)
 Balance
 
   `smd_reduction` compares the aggregate standardized mean difference of the raw
-  covariates x against that of the learned representation z_mod. It is the direct
+  covariates x against that of the learned representation z. It is the direct
   read on whether the MMD term did its job, and the one metric that applies
   identically to every dataset.
 """
@@ -256,25 +256,25 @@ def approximate_risk_ratio_ci(
 # -- balance ---------------------------------------------------------------
 
 
-def smd_reduction(x, z_mod, t) -> float:
-    """Fraction of aggregate SMD removed going from raw x to the representation z_mod.
+def smd_reduction(x, z, t) -> float:
+    """Fraction of aggregate SMD removed going from raw x to the representation z.
 
-    1 - mean_j SMD_j(z_mod) / mean_j SMD_j(x): 1.0 means perfectly balanced, 0.0 no
+    1 - mean_j SMD_j(z) / mean_j SMD_j(x): 1.0 means perfectly balanced, 0.0 no
     improvement, negative means the representation is *less* balanced than the input.
     Returns 0.0 when x is already balanced (nothing to remove, so no gain to claim).
 
-    The two aggregates live in different spaces (x in R^m, z_mod in R^k_latent), which
+    The two aggregates live in different spaces (x in R^m, z in R^k_latent), which
     is fine because the SMD is standardized per dimension before averaging - but it
     does mean the ratio compares average per-dimension imbalance, not a distance.
     """
     x = _to_numpy_2d(x)
-    z_mod = _to_numpy_2d(z_mod)
+    z = _to_numpy_2d(z)
     t = _to_numpy(t)
-    if x.shape[0] != t.shape[0] or z_mod.shape[0] != t.shape[0]:
-        raise ValueError("x, z_mod and t must have the same number of rows")
+    if x.shape[0] != t.shape[0] or z.shape[0] != t.shape[0]:
+        raise ValueError("x, z and t must have the same number of rows")
 
     before = float(smd_per_covariate(x, t).mean())
-    after = float(smd_per_covariate(z_mod, t).mean())
+    after = float(smd_per_covariate(z, t).mean())
     if before == 0.0:
         return 0.0
     return float(1.0 - after / before)

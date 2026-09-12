@@ -1,8 +1,9 @@
-"""Model components: SSAE encoder/decoder, PGAG decomposition+gating, TARNet heads.
+"""Model components: SSAE encoder/decoder, PGAG decomposition + admission gate, heads.
 
-Assembled by `ssae_cfr.models.ssae_cfr` into the full v1 / Variant A model. Modules
-subclass `torch.nn.Module`. Exports grow as each component is implemented (Milestones
-5-7); the encoder/decoder land first.
+Assembled by `ssae_cfr.models.ssae_cfr` into the full v1 / Variant A model, which runs
+one encoder pass over `x_mod = P_U x + b(x) * (I - P_U) x` and reads the decoder, the two
+TARNet heads and the MMD off the single resulting code. Modules subclass
+`torch.nn.Module`.
 """
 
 from .heads import OutcomeHeads

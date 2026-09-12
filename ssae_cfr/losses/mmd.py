@@ -1,4 +1,4 @@
-"""MMD balancing loss on z_mod.
+"""MMD balancing loss on z.
 
 Empirical (biased) squared Maximum Mean Discrepancy between the treated and control
 codes, with an RBF kernel:
@@ -6,7 +6,7 @@ codes, with an RBF kernel:
     MMD^2 = mean k(z_t, z_t') + mean k(z_c, z_c') - 2 mean k(z_t, z_c)
 
 Driving this toward zero forces the treated and control code distributions to overlap -
-representation-level balancing, the CFR idea. What makes it work here is that z_mod is
+representation-level balancing, the CFR idea. What makes it work here is that z is
 the STOCHASTIC code: when the two groups have little common support, the deterministic
 codes would be cleanly separable and the kernel would see two far-apart point clouds
 with a vanishing cross term and an uninformative gradient. The SMD-scaled noise smears
@@ -33,22 +33,22 @@ def _sq_dists(a: Tensor, b: Tensor) -> Tensor:
     return torch.cdist(a, b).pow(2)
 
 
-def mmd_rbf(z_mod: Tensor, t: Tensor, bandwidth: Optional[float] = None) -> Tensor:
-    """Squared RBF-MMD between z_mod[t==1] and z_mod[t==0]. Scalar, >= 0.
+def mmd_rbf(z: Tensor, t: Tensor, bandwidth: Optional[float] = None) -> Tensor:
+    """Squared RBF-MMD between z[t==1] and z[t==0]. Scalar, >= 0.
 
     Returns a differentiable zero if either arm is absent from the batch (MMD is
     undefined with only one group), so a degenerate mini-batch cannot crash training.
     """
     t = t.reshape(-1)
-    z_t = z_mod[t == 1]
-    z_c = z_mod[t == 0]
+    z_t = z[t == 1]
+    z_c = z[t == 0]
     if z_t.shape[0] == 0 or z_c.shape[0] == 0:
-        return z_mod.sum() * 0.0
+        return z.sum() * 0.0
 
     if bandwidth is None:
         # median of pooled pairwise squared distances (pdist excludes self-pairs)
-        pooled = torch.pdist(z_mod).pow(2)
-        med = torch.median(pooled) if pooled.numel() > 0 else z_mod.new_tensor(1.0)
+        pooled = torch.pdist(z).pow(2)
+        med = torch.median(pooled) if pooled.numel() > 0 else z.new_tensor(1.0)
         denom = med + _EPS
     else:
         denom = 2.0 * bandwidth * bandwidth

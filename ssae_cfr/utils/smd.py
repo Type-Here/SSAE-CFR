@@ -15,7 +15,7 @@ Two design points make this robust:
     the balancing (MMD) term. Noise is high precisely when the groups are far apart (the
     regime with little overlap) and fades to zero once they are balanced.
   - The per-covariate vector is returned too, because it doubles as a diagnostic (which
-    covariates are imbalanced, and the SMD-reduction metric x vs z_mod).
+    covariates are imbalanced, and the SMD-reduction metric x vs z).
 """
 
 from __future__ import annotations

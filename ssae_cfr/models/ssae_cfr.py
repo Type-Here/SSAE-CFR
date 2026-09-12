@@ -35,7 +35,7 @@ wrong scale.
 A continuous outcome is additionally *standardized inside the model*: the heads are
 trained against `(y - y_loc) / y_scale` and `to_outcome_scale` undoes it. This is not
 cosmetic. `L_fact` is the only term measured on the outcome's units, while `L_mmd`,
-`L_rec` and `L_align` all live on the standardized covariate scale, so without this the
+`L_rec` and `L_pref` all live on the standardized covariate scale, so without this the
 effective balancing weight is `alpha_mmd / var(y)` and a hyperparameter tuned on one
 dataset means something different on the next. On IHDP the outcome scale varies about
 fifteenfold *across realizations* of the same benchmark, which made a single alpha_mmd
