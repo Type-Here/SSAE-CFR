@@ -5,7 +5,7 @@
 Estimating conditional average treatment effects (CATE) from observational tabular data,
 with two departures from the usual counterfactual-regression recipe:
 
-1. **A stochastic denoising sparse autoencoder in place of a deterministic encoder.**
+1. **A stochastic autoencoder in place of a deterministic encoder.**
    Balanced-representation methods (CFR, TARNet) penalize the distance between the treated
    and control representations. When the two groups are well separated, that penalty has
    almost nothing to push against - the distributions barely overlap, so the gradient is
@@ -20,10 +20,17 @@ with two departures from the usual counterfactual-regression recipe:
    domain LLM, and the resulting matrix `V` is reduced by SVD into an orthogonal
    projector `P_U = U_k U_k^T`. Every patient vector `x` splits, in feature space, into
    `x_prior = P_U x` (the part lying in the span of what is clinically documented) and a
-   residual `x_res = x - x_prior`. Both go through the same encoder; a gating network
-   blends the two codes per dimension; an alignment loss shrinks the residual branch. The
-   effect is to make the model exhaust known clinical explanations before it leans on
-   undocumented correlations - a guard against balance that rests on spurious structure.
+   residual `x_res = x - x_prior`. An **admission gate** then decides, per covariate and
+   per patient, how much of that residual to let in:
+
+       x_mod = x_prior + b(x) * x_res,    b(x) in [0, 1]^m
+
+   and a bounded penalty `L_pref = mean_j b_j` prices the admission. The effect is to make
+   the model exhaust known clinical explanations before it leans on undocumented
+   correlations - a guard against balance that rests on spurious structure - while `b`
+   stays directly readable: it says which covariates needed the part the prior does not
+   name. The form is additive rather than a blend, so `b = 1` recovers `x` exactly: the
+   model without a prior is a setting of this model, not a different one.
 
 Good distributional balance is not the same as valid causal identification. The prior is
 there for the second problem, the stochasticity for the first.
@@ -31,14 +38,26 @@ there for the second problem, the stochasticity for the first.
 ## Status
 
 The v1 model (feature-space decomposition, Gaussian latent noise, no KL term) is complete
-and trains. The evaluation harness runs on all five dataset adapters. What is **not** done:
+and trains. The evaluation harness runs on all five dataset adapters, and the real IHDP
+prior is built (BioMistral-7B, `k_svd = 12` of 25). What is **not** done:
 
-- The real covariate embeddings. Every number produced so far uses a *placeholder* random
-  `V`, which yields a geometrically valid but semantically meaningless `P_U`. Results are
-  not reportable until the LLM embedding step has run. See "Building the prior" below.
+- **The admission gate is new and unmeasured.** It replaced an earlier design that blended
+  the two encoded branches convexly in latent space; that form could not represent the
+  full covariate vector at all, so the "no prior" case was unreachable. The replacement is
+  argued, tested and not yet benchmarked - no result in this repo was produced with it.
+- **The prior's contribution to tau is still unmeasured.** The prior carries real semantic
+  structure (covariate groups are recovered from the gloss text alone, with no data), but
+  whether the decomposition improves the estimate is exactly what `b = 1` vs learned `b`
+  is meant to answer, and that comparison has not been run.
+- A selection criterion that targets tau. The only oracle-free criterion available is the
+  held-out factual objective, which is a reliable filter and an unreliable ranker, so no
+  hyperparameter here is honestly tuned.
 - Baselines (TARNet/CFRNet, BCAUSS) are not implemented; IHDP runs print published
-  reference numbers for orientation instead.
-- Ablations.
+  reference numbers for orientation instead. Those are orientation only, not a
+  like-for-like comparison.
+- Priors for the non-IHDP datasets. Without a cached `P_U` those runs fall back to a
+  *placeholder* random `V` - geometrically valid, semantically meaningless, and never for
+  reported results. See "Building the prior" below.
 
 ## Install
 
@@ -189,7 +208,7 @@ ssae_cfr/
   data/          dataset adapters -> a single `Dataset` container
   prior/         glosses -> LLM embeddings V -> projector P_U (offline, cached)
   models/        ssae.py (encoder/decoder), pgag.py (split + gate), heads.py, ssae_cfr.py
-  losses/        factual, mmd, align, and the weighted total
+  losses/        factual, mmd, preference, and the weighted total
   utils/         standardization, splitting, SMD, schedules, metrics
   experiments/   benchmark protocols whose comparison rules are fixed (IHDP)
   train.py       fit one model
@@ -218,7 +237,9 @@ checkout.
 | `k_svd` | rank of the projector `P_U` (`P_U` is always `m x m`) |
 | `k_latent` | encoder bottleneck width |
 | `omega` | noise scale, `tanh(alpha_smd * mean SMD)`, detached |
-| `z_mod` | the gated representation: the only thing the heads see and the only thing the MMD balances |
+| `b` | the admission gate in `[0, 1]^m`: how much of each covariate's residual is let in |
+| `x_mod` | `P_U x + b * (I - P_U) x`, the encoder's input |
+| `z` | the representation: what the decoder, the heads and the MMD all read |
 
 `k_svd` and `k_latent` are independent and are never tied to each other.
 
