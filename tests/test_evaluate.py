@@ -289,18 +289,18 @@ def test_factual_objective_needs_no_oracle():
 
 def test_final_training_diagnostics_reads_the_last_scored_epoch():
     history = [
-        {"share_L_fact": 0.9, "share_L_rec": 0.1, "mu_res_norm": 5.0, "epoch": 0},
-        {"share_L_fact": 0.4, "share_L_rec": 0.6, "mu_res_norm": 2.0, "epoch": 1},
+        {"share_L_fact": 0.9, "share_L_rec": 0.1, "b_mean": 0.5, "epoch": 0},
+        {"share_L_fact": 0.4, "share_L_rec": 0.6, "b_mean": 0.2, "epoch": 1},
     ]
     out = final_training_diagnostics(history)
     assert out["train_share_L_rec"] == 0.6
-    assert out["train_mu_res_norm"] == 2.0
+    assert out["train_b_mean"] == 0.2
 
 
 def test_final_training_diagnostics_skips_the_early_stopping_record():
     """`fit` appends a bookkeeping entry after the loop; it carries no diagnostics."""
     history = [
-        {"share_L_fact": 0.4, "mu_res_norm": 2.0, "epoch": 1},
+        {"share_L_fact": 0.4, "b_mean": 0.2, "epoch": 1},
         {"early_stopped_to_epoch": 1, "best_val_objective": 0.3},
     ]
     assert final_training_diagnostics(history)["train_share_L_fact"] == 0.4
@@ -308,3 +308,55 @@ def test_final_training_diagnostics_skips_the_early_stopping_record():
 
 def test_final_training_diagnostics_of_an_empty_history_is_empty():
     assert final_training_diagnostics([]) == {}
+
+
+# -- admission-gate diagnostics ----------------------------------------------
+
+def _rank_reduced_model(m: int, k: int) -> SSAECFR:
+    """A model whose P_U keeps only k directions, so the residual is non-trivial."""
+    cfg = load_config(None, k_latent=4, encoder_hidden=(8,), decoder_hidden=(8,),
+                      head_hidden=(4,), gating_hidden=(4,))
+    torch.manual_seed(0)
+    U, _ = torch.linalg.qr(torch.randn(m, k))
+    return SSAECFR(m=m, P_U=(U @ U.T).float(), cfg=cfg)
+
+
+def test_score_split_reports_the_admission_gate():
+    ds = _dataset(m=6)
+    scores = score_split(_rank_reduced_model(6, 3), ds, benefit=True)
+    for key in ("b_mean", "b_std", "b_patient_std", "residual_admitted"):
+        assert key in scores and np.isfinite(scores[key])
+    assert 0.0 <= scores["b_mean"] <= 1.0
+    assert 0.0 <= scores["residual_admitted"] <= 1.0
+
+
+def test_admission_is_reported_per_covariate_as_flat_keys():
+    """Flat scalars, so `aggregate` averages them across runs with no special case."""
+    ds = _dataset(m=6)
+    scores = score_split(_rank_reduced_model(6, 3), ds, benefit=True)
+    per_cov = [scores[f"b_cov_{j:02d}"] for j in range(6)]
+    assert len(per_cov) == 6 and all(0.0 <= v <= 1.0 for v in per_cov)
+    assert f"b_cov_{6:02d}" not in scores, "one key per covariate, no more"
+    assert np.mean(per_cov) == pytest.approx(scores["b_mean"], abs=1e-6)
+
+
+def test_residual_admitted_is_zero_when_there_is_no_residual():
+    """P_U = I leaves nothing to admit; the ratio must not divide by zero."""
+    ds = _dataset(m=6)
+    scores = score_split(_model(6), ds, benefit=True)  # _model uses P_U = I
+    assert scores["residual_admitted"] == 0.0
+
+
+def test_fixed_gate_modes_show_up_in_the_diagnostics():
+    """b_mode is the nested ablation, so the diagnostic must read it back exactly."""
+    ds = _dataset(m=6)
+    for mode, expected in (("one", 1.0), ("zero", 0.0)):
+        cfg = load_config(None, k_latent=4, encoder_hidden=(8,), decoder_hidden=(8,),
+                          head_hidden=(4,), gating_hidden=(4,), b_mode=mode)
+        torch.manual_seed(0)
+        U, _ = torch.linalg.qr(torch.randn(6, 3))
+        model = SSAECFR(m=6, P_U=(U @ U.T).float(), cfg=cfg)
+        scores = score_split(model, ds, benefit=True)
+        assert scores["b_mean"] == pytest.approx(expected)
+        assert scores["b_patient_std"] == pytest.approx(0.0)
+        assert scores["residual_admitted"] == pytest.approx(expected)

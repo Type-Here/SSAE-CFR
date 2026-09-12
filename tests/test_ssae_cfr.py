@@ -46,9 +46,54 @@ def test_forward_surface():
     out = model(x, t, omega=0.0)
     for key in ("y0_hat", "y1_hat", "yf_hat"):
         assert out[key].shape == (64,)
-    for key in ("z_mod", "lam", "mu_res", "z_prior", "z_res", "mu_enc", "z_enc"):
+    for key in ("z", "mu"):
         assert out[key].shape == (64, 8)
-    assert out["x_hat"].shape == (64, M)
+    for key in ("b", "x_mod", "x_res", "x_hat"):
+        assert out[key].shape == (64, M)
+
+
+def test_the_reconstruction_target_is_the_whole_x():
+    """L_rec rebuilds x, not the gated x_mod - that is what pushes the gate open.
+
+    Reconstructing x_mod instead would make the objective satisfiable by admitting
+    nothing, and L_pref would then drive b to zero unopposed.
+    """
+    model, _ = _model()
+    x, t, yf = _batch()
+    out = model(x, t, omega=0.0)
+    expected = torch.nn.functional.mse_loss(out["x_hat"], x)
+    assert torch.allclose(model.loss_terms(out, x, t, yf, "continuous")["L_rec"], expected)
+
+
+def test_one_code_feeds_the_decoder_the_heads_and_the_mmd():
+    """P6: there is no second representation to drift away from the causal one."""
+    model, _ = _model()
+    x, t, _ = _batch()
+    out = model(x, t, omega=0.0)
+    assert torch.allclose(model.decoder(out["z"]), out["x_hat"])
+    y0, y1 = model.heads(out["z"])
+    assert torch.allclose(y0, out["y0_hat"]) and torch.allclose(y1, out["y1_hat"])
+
+
+def test_b_one_is_the_model_without_a_prior():
+    """The ablation is nested: same architecture, same weights, one config field."""
+    cfg = load_config(None, k_latent=8, encoder_hidden=(16,), decoder_hidden=(16,),
+                      head_hidden=(8,), gating_hidden=(8,), b_mode="one")
+    model, _ = _model(cfg)
+    x, t, _ = _batch()
+    out = model(x, t, omega=0.0)
+    assert torch.allclose(out["x_mod"], x, atol=1e-5)
+    assert model.loss_terms(out, x, t, _batch()[2], "continuous")["L_pref"] == 1.0
+
+
+def test_b_zero_is_the_prior_only_model():
+    cfg = load_config(None, k_latent=8, encoder_hidden=(16,), decoder_hidden=(16,),
+                      head_hidden=(8,), gating_hidden=(8,), b_mode="zero")
+    model, _ = _model(cfg)
+    x, t, yf = _batch()
+    out = model(x, t, omega=0.0)
+    assert torch.allclose(out["x_res"] * out["b"], torch.zeros_like(x))
+    assert model.loss_terms(out, x, t, yf, "continuous")["L_pref"] == 0.0
 
 
 def test_yf_hat_selects_the_factual_arm():
@@ -63,7 +108,7 @@ def test_loss_terms_are_finite_scalars():
     model, _ = _model()
     x, t, yf = _batch()
     terms = model.loss_terms(model(x, t, 0.0), x, t, yf, "continuous")
-    assert set(terms) == {"L_fact", "L_mmd", "L_sparse", "L_rec", "L_align"}
+    assert set(terms) == {"L_fact", "L_mmd", "L_sparse", "L_rec", "L_pref"}
     for v in terms.values():
         assert v.ndim == 0 and torch.isfinite(v)
 
@@ -134,7 +179,7 @@ def test_outcome_affine_is_state_not_a_constructor_argument():
 def test_loss_standardizes_the_target_to_meet_the_heads():
     """L_fact must be computed against the standardized outcome, not the raw one.
 
-    Otherwise L_fact alone is on the outcome's units while L_mmd, L_rec and L_align are
+    Otherwise L_fact alone is on the outcome units while L_mmd, L_rec and L_pref are
     on the standardized covariate scale, and alpha_mmd silently means a different thing
     on every dataset - the bug this standardization exists to remove.
     """
