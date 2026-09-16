@@ -87,26 +87,45 @@ def format_shares(breakdown: dict) -> str:
 
 
 def admission_diagnostics(b: Tensor, x_res: Tensor) -> dict:
-    """How the admission gate is behaving, as four scalars.
+    """How the admission gate is behaving, as five scalars.
 
     `b_mean` alone cannot tell a gate that decides per patient from one that has
-    collapsed to a single uniform value, which is the declared risk of this design. So
-    `b_patient_std` - the spread across patients of each patient's mean admission - is
-    reported beside it: near zero means every patient gets the same decision, however
-    interesting `b_mean` looks.
+    collapsed to a single uniform value, which is the declared risk of this design.
+
+    `b_within_cov_share` is the tell. It is the share of the variance of `b` that lives
+    *within* a covariate, i.e. across patients, the rest being the fixed per-covariate
+    admission policy. Near zero means every patient gets the same decision and the gate
+    has degenerated into a covariate mask; near one means the decision is genuinely
+    per patient.
+
+    `b_patient_std` - the spread across patients of each patient's *mean* admission - is
+    kept because it answers a different question, how much the overall admission budget
+    varies per patient. It is deliberately NOT the collapse tell: averaging over the m
+    covariates before taking the spread cancels independent per-patient deviations and
+    shrinks them by roughly sqrt(m), so on IHDP it reads ~0.03 against a within-covariate
+    share of ~0.8. Read alone it says "collapsed" about a gate that is not.
 
     `residual_admitted` is the fraction of residual energy actually let through,
     ||b * x_res|| / ||x_res||. It differs from `b_mean` because `b` is weighted by how
     much residual each covariate carries: a high mean admission spent on covariates with
-    almost no residual admits almost nothing.
+    almost no residual admits almost nothing. It is bounded by max_j b_j, not by
+    `b_mean`, so a sparse gate that opens fully on a few coordinates reads far above the
+    mean - which is the intended behaviour, not an inconsistency.
     """
     b = b.detach()
     admitted = (b * x_res.detach()).norm()
     residual = x_res.detach().norm()
+    total_var = float(b.var(unbiased=False))
+    if b.shape[0] > 1 and total_var > 0.0:
+        within = float(((b - b.mean(dim=0, keepdim=True)) ** 2).mean())
+        within_share = within / total_var
+    else:
+        within_share = 0.0
     return {
         "b_mean": float(b.mean()),
         "b_std": float(b.std()),
         "b_patient_std": float(b.mean(dim=-1).std()) if b.shape[0] > 1 else 0.0,
+        "b_within_cov_share": within_share,
         "residual_admitted": float(admitted / residual) if float(residual) > 0.0 else 0.0,
     }
 
@@ -190,7 +209,8 @@ def fit(
                 f"pref {last['L_pref']:.4f} g {last['gamma']:.2f}) | "
                 f"share {format_shares(last)} | "
                 f"b {last['b_mean']:.2f}+-{last['b_std']:.2f} "
-                f"(pt sd {last['b_patient_std']:.3f}) "
+                f"(within {last['b_within_cov_share']:.2f} "
+                f"pt sd {last['b_patient_std']:.3f}) "
                 f"adm {last['residual_admitted']:.2f} omega {last['omega']:.2f}"
             )
 

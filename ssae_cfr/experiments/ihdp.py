@@ -233,10 +233,13 @@ def format_benchmark(summary: Dict[str, Dict[str, float]], n_realizations: int) 
         ("out_smd_reduction", "SMD reduction (out)"),
         ("pool_z_norm", "|z| (pool)"),
         # b_mean alone cannot distinguish a per-patient decision from a gate that has
-        # collapsed to one uniform value, so the per-patient spread sits under it, and
-        # the admitted fraction of residual energy under that - a high mean admission
-        # spent on covariates carrying little residual admits little.
+        # collapsed to one uniform value. The within-covariate variance share is the tell
+        # for that; the per-patient sd underneath answers the narrower question of how
+        # much the admission budget varies per patient. Under those, the admitted
+        # fraction of residual energy - a high mean admission spent on covariates
+        # carrying little residual admits little.
         ("pool_b_mean", "b mean (pool)"),
+        ("pool_b_within_cov_share", "b within-cov var share"),
         ("pool_b_patient_std", "b per-patient sd (pool)"),
         ("pool_residual_admitted", "residual admitted (pool)"),
         ("pool_ate_hat", "ATE hat (pool)"),

@@ -27,6 +27,7 @@ from ssae_cfr.evaluate import (
     score_split,
 )
 from ssae_cfr.models import SSAECFR
+from ssae_cfr.train import admission_diagnostics
 
 
 def _dataset(outcome_type: str = "continuous", n: int = 120, m: int = 6, oracle: bool = True) -> Dataset:
@@ -324,7 +325,8 @@ def _rank_reduced_model(m: int, k: int) -> SSAECFR:
 def test_score_split_reports_the_admission_gate():
     ds = _dataset(m=6)
     scores = score_split(_rank_reduced_model(6, 3), ds, benefit=True)
-    for key in ("b_mean", "b_std", "b_patient_std", "residual_admitted"):
+    for key in ("b_mean", "b_std", "b_patient_std", "b_within_cov_share",
+                "residual_admitted"):
         assert key in scores and np.isfinite(scores[key])
     assert 0.0 <= scores["b_mean"] <= 1.0
     assert 0.0 <= scores["residual_admitted"] <= 1.0
@@ -359,4 +361,31 @@ def test_fixed_gate_modes_show_up_in_the_diagnostics():
         scores = score_split(model, ds, benefit=True)
         assert scores["b_mean"] == pytest.approx(expected)
         assert scores["b_patient_std"] == pytest.approx(0.0)
+        assert scores["b_within_cov_share"] == pytest.approx(0.0)
         assert scores["residual_admitted"] == pytest.approx(expected)
+
+
+def test_within_cov_share_separates_a_covariate_mask_from_a_per_patient_gate():
+    """The collapse tell. A gate that is one fixed mask for everyone must read ~0.
+
+    This is the diagnostic `b_patient_std` cannot provide: averaging b over the m
+    covariates before taking the spread cancels independent per-patient deviations, so a
+    genuinely per-patient gate still reads a near-zero per-patient sd.
+    """
+    x_res = torch.randn(200, 25)
+
+    mask = torch.rand(1, 25).expand(200, 25)  # same decision for every patient
+    assert admission_diagnostics(mask, x_res)["b_within_cov_share"] == pytest.approx(0.0)
+
+    per_patient = torch.rand(200, 25)  # no per-covariate structure at all
+    assert admission_diagnostics(per_patient, x_res)["b_within_cov_share"] > 0.95
+
+
+def test_patient_std_understates_a_per_patient_gate_by_root_m():
+    """Why the tell had to change: the two diagnostics disagree by construction."""
+    torch.manual_seed(0)
+    b = torch.rand(500, 25)
+    diag = admission_diagnostics(b, torch.randn(500, 25))
+    # Independent across covariates, so the per-patient mean concentrates as 1/sqrt(m).
+    assert diag["b_patient_std"] == pytest.approx(float(b.std()) / 5.0, rel=0.2)
+    assert diag["b_within_cov_share"] > 0.95
