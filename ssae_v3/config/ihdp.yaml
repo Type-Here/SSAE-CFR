@@ -1,17 +1,46 @@
 # IHDP hyperparameter overrides on top of DefaultConfig defaults (empirical baseline).
 # IHDP: m=25, ~747 units, continuous outcome, oracle mu0/mu1 (PEHE ground truth).
+#
+# Selected on the empirical variant over 15-20 paired realizations, using
+# val_factual_objective_normalized as the only selection key, then frozen for the whole
+# variant ladder. Causal metrics were reported alongside but never selected on.
 dataset: ihdp
 in_channels: 25
 model_variant: empirical
 d_u: 32
 # Full-batch: IHDP is small, so per-batch SMD is stable.
 batch_size: null
-epochs: 300
+
+# Epoch budget. 160 is where the criterion bottoms out with early stopping off; with the
+# stopper on, this is a cap it rarely reaches.
+epochs: 400
+
+# Early stopping. Measured on this architecture to be neutral-to-better on the causal
+# metrics (out PEHE 0.953 vs 0.962, eps_ATE 0.142 vs 0.144), which reverses the earlier
+# finding on the previous architecture. patience 6 was worse on eps_ATE than 3.
+patience: 3
+es_check_every: 5
+
 # k_U left as auto (choose_k_svd at 90% energy); no protected covariates for this
-# semisynthetic benchmark. r_W_rank also left auto (defaults to k_U).
+# semi-synthetic benchmark. r_W_rank also left auto (defaults to k_U).
 energy_threshold: 0.90
-# Both must be re-selected on the empirical variant, then frozen across the whole
-# ladder - the values below are a starting point.
-alpha_mmd: 1.0
-lambda_rec: 1.0
+
+# L1 off: 0 wins the criterion, 1e-3 loses 4/15, and 1e-1 collapses the code norm from
+# 5.83 to 1.33. The previous architecture preferred 1e-3; that did not transfer.
 beta_l1: 0.0
+lambda_rec: 1.0
+
+# NOT a selection: the criterion scores alpha_mmd 0 and 10 identically (0.2020 vs 0.2022)
+# and cannot tell "no balancing at all" from strong balancing. 3 is a judgment - the
+# largest weight that buys substantial balance (SMD reduction 0.007 -> 0.460) while
+# leaving the representation norm essentially intact (-5%), where 10 costs 16% of the
+# norm and 30 costs 34%. Revisit once an R-loss style criterion exists.
+alpha_mmd: 3.0
+
+# Noise left at the DefaultConfig setting (on, absolute, alpha_smd=2.0). Four arms at this
+# operating point - on, off, alpha_smd 0.26 and 1.0 - span only 0.1993-0.2045 on the
+# criterion with win counts at or below chance, so there is no evidence to move it. Note
+# alpha_smd=2.0 maps IHDP's mean SMD of 0.194 to omega=0.37, far from the "almost off when
+# overlap is already good" behavior the modulator was designed for; that is a real design
+# mismatch which simply does not show up in IHDP numbers. Revisit on a dataset with
+# genuinely poor overlap.
