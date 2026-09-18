@@ -136,7 +136,8 @@ class SSAECFRv3(nn.Module):
 
     def forward(self, x: Tensor, t: Tensor, omega: float = 0.0) -> Dict[str, Tensor]:
         mu, u, x_hat = self.empirical(x, omega)
-        r_U, r_W = self.reliability(x)
+        #r_U, r_W = self.reliability(x)
+        r_U, r_W = (1,1)
 
         if self.u_adapter is not None:
             c = self.u_adapter(x)
@@ -155,13 +156,13 @@ class SSAECFRv3(nn.Module):
             u_out = u_shared
 
         y0_hat, y1_hat = self.heads(u_out)
-        tf = t.to(y1_hat.dtype)
-        yf_hat = tf * y1_hat + (1.0 - tf) * y0_hat
+        #tf = t.to(y1_hat.dtype)
+        #yf_hat = tf * y1_hat + (1.0 - tf) * y0_hat
 
         return {
             "y0_hat": y0_hat,
             "y1_hat": y1_hat,
-            "yf_hat": yf_hat,
+            #"yf_hat": yf_hat,
             "x_hat": x_hat,
             "mu": mu,
             "u": u,
@@ -183,7 +184,8 @@ class SSAECFRv3(nn.Module):
     ) -> Dict[str, Tensor]:
         """The four loss terms: factual fit, balance, sparsity, reconstruction only."""
         outcome_type = outcome_type or self.outcome_type
-        code = out["u"] if self.l1_target == "u" else out["mu"]
+        #code = out["u"] if self.l1_target == "u" else out["mu"]
+        code = out["mu"]
         # The heads live on the standardized outcome, so the target is standardized
         # to meet them; to_outcome_scale undoes this on the way out.
         if outcome_type != "binary":

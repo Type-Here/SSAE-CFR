@@ -122,7 +122,7 @@ class DefaultConfig:
     # On by default: the SMD-driven noise is what every existing number was produced
     # under, and with it off the MMD sees deterministic codes - the collapse regime the
     # stochastic branch exists to defeat. False is the ablation switch, not the baseline.
-    is_noise_active: bool = True             # True => add noise to the empirical code
+    is_noise_active: bool = False             # True => add noise to the empirical code
     noise_dist: str = "gaussian"             # "gaussian" | "laplace"
     alpha_smd: float = 2.0                   # omega = tanh(alpha_smd * SMD)
     # "absolute" (z = mu + omega*eps) is what every existing number was produced under;
