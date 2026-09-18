@@ -16,7 +16,7 @@ import pytest
 from ssae_v3.prior_modules.controls import (
     CONTROLS,
     apply_control,
-    random_projector,
+    random_basis,
     random_semantics,
     shuffled_semantics,
 )
@@ -24,22 +24,21 @@ from ssae_v3.prior_modules.u_adapter import UStructuralAdapter
 from ssae_v3.prior_modules.w_adapter import WSemanticAdapter
 
 
-def test_random_projector_is_a_genuine_projector():
-    """random_projector is symmetric, idempotent, and has trace == rank."""
+def test_random_basis_is_a_genuine_orthonormal_basis():
+    """random_basis is (m, rank) with orthonormal columns, like U_k."""
     m, rank = 8, 3
-    p = random_projector(m, rank, seed=0)
-    assert torch.allclose(p, p.T, atol=1e-5)
-    assert torch.allclose(p @ p, p, atol=1e-4)
-    assert abs(float(torch.trace(p)) - rank) < 1e-4
+    b = random_basis(m, rank, seed=0)
+    assert b.shape == (m, rank)
+    assert torch.allclose(b.T @ b, torch.eye(rank), atol=1e-5)
 
 
-def test_random_projector_is_seed_reproducible_and_seed_sensitive():
-    """The same seed reproduces the same projector; a different seed gives a different one."""
-    p1 = random_projector(8, 3, seed=0)
-    p2 = random_projector(8, 3, seed=0)
-    p3 = random_projector(8, 3, seed=1)
-    assert torch.equal(p1, p2)
-    assert not torch.equal(p1, p3)
+def test_random_basis_is_seed_reproducible_and_seed_sensitive():
+    """The same seed reproduces the same basis; a different seed gives a different one."""
+    b1 = random_basis(8, 3, seed=0)
+    b2 = random_basis(8, 3, seed=0)
+    b3 = random_basis(8, 3, seed=1)
+    assert torch.equal(b1, b2)
+    assert not torch.equal(b1, b3)
 
 
 def test_shuffled_semantics_is_a_true_permutation_and_not_identity():
@@ -73,29 +72,30 @@ def test_random_semantics_matches_shape_and_rms():
 def test_apply_control_dispatches_every_named_control():
     """apply_control handles every name in CONTROLS and rejects an unknown one."""
     m, r = 6, 3
-    p_u = random_projector(m, r, seed=0)
+    u_k = random_basis(m, r, seed=0)
     q_tilde = torch.randn(m, r)
 
     for control in CONTROLS:
-        p_out, q_out = apply_control(p_u, q_tilde, control, seed=0)
-        assert p_out is not None
+        u_out, q_out = apply_control(u_k, q_tilde, control, seed=0)
+        assert u_out is not None
+        assert u_out.shape == u_k.shape
         assert q_out is not None
 
     with pytest.raises(ValueError):
-        apply_control(p_u, q_tilde, "not-a-real-control", seed=0)
+        apply_control(u_k, q_tilde, "not-a-real-control", seed=0)
 
 
 def test_apply_control_leaves_an_absent_branch_as_none():
     """A branch not supplied (None) is never fabricated by a control."""
     m, r = 6, 3
     q_tilde = torch.randn(m, r)
-    p_out, q_out = apply_control(None, q_tilde, "nonsemantic", seed=0)
-    assert p_out is None
+    u_out, q_out = apply_control(None, q_tilde, "nonsemantic", seed=0)
+    assert u_out is None
     assert q_out is not None
 
-    p_u = random_projector(m, r, seed=0)
-    p_out2, q_out2 = apply_control(p_u, None, "nonsemantic", seed=0)
-    assert p_out2 is not None
+    u_k = random_basis(m, r, seed=0)
+    u_out2, q_out2 = apply_control(u_k, None, "nonsemantic", seed=0)
+    assert u_out2 is not None
     assert q_out2 is None
 
 
@@ -121,19 +121,19 @@ def test_shuffled_semantics_control_actually_changes_the_w_branch():
     assert not torch.allclose(real_adapter(x), control_adapter(x), atol=1e-6)
 
 
-def test_random_projector_control_actually_changes_the_u_branch():
-    """Swapping in a random rank-matched projector changes c, so the control is not a no-op."""
+def test_random_basis_control_actually_changes_the_u_branch():
+    """Swapping in a random rank-matched basis changes c, so the control is not a no-op."""
     m, rank, d_u = 7, 3, 6
-    p_u = random_projector(m, rank, seed=0)
-    p_control = random_projector(m, rank, seed=99)
+    u_k = random_basis(m, rank, seed=0)
+    u_control = random_basis(m, rank, seed=99)
 
     torch.manual_seed(7)
-    real_adapter = UStructuralAdapter(p_u, d_u, hidden=(6,))
+    real_adapter = UStructuralAdapter(u_k, d_u, hidden=(6,))
     torch.nn.init.normal_(real_adapter.net[-1].weight, std=1.0)
     torch.nn.init.normal_(real_adapter.net[-1].bias, std=1.0)
 
     torch.manual_seed(7)
-    control_adapter = UStructuralAdapter(p_control, d_u, hidden=(6,))
+    control_adapter = UStructuralAdapter(u_control, d_u, hidden=(6,))
     torch.nn.init.normal_(control_adapter.net[-1].weight, std=1.0)
     torch.nn.init.normal_(control_adapter.net[-1].bias, std=1.0)
 

@@ -131,7 +131,7 @@ def test_aggregate_reports_mean_median_std_and_ignores_nan():
 
 
 def test_variant_requiring_an_adapter_without_its_prior_is_impossible():
-    """A variant whose branch needs P_U/q_tilde raises when that prior is not given."""
+    """A variant whose branch needs U_k/q_tilde raises when that prior is not given."""
     for variant in ("u_adapter", "w_adapter", "u_w_adapter"):
         cfg = load_config(None, in_channels=M, model_variant=variant)
         with pytest.raises(ValueError):
