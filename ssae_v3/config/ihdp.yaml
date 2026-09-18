@@ -1,0 +1,17 @@
+# IHDP hyperparameter overrides on top of DefaultConfig defaults (empirical baseline).
+# IHDP: m=25, ~747 units, continuous outcome, oracle mu0/mu1 (PEHE ground truth).
+dataset: ihdp
+in_channels: 25
+model_variant: empirical
+d_u: 32
+# Full-batch: IHDP is small, so per-batch SMD is stable.
+batch_size: null
+epochs: 300
+# k_U left as auto (choose_k_svd at 90% energy); no protected covariates for this
+# semisynthetic benchmark. r_W_rank also left auto (defaults to k_U).
+energy_threshold: 0.90
+# Both must be re-selected on the empirical variant, then frozen across the whole
+# ladder - the values below are a starting point.
+alpha_mmd: 1.0
+lambda_rec: 1.0
+beta_l1: 0.0
