@@ -4,7 +4,7 @@ Pipeline: load config -> standardize the dataset (train stats reused on any othe
 split) -> load the dataset's real semantic prior, if the variant needs one -> build
 the model -> optimize the four-term objective, logging per-epoch diagnostics.
 
-There is no placeholder prior here: a variant that needs P_U/q_tilde and finds no
+There is no placeholder prior here: a variant that needs U_k/q_tilde and finds no
 built bundle is a configuration error, not something to paper over with random
 tensors, so `prior_for` raises and names the command that builds the real thing.
 """
@@ -61,8 +61,8 @@ def prior_for(
     if control == "none":
         return prior
     seed = cfg.seed if control_seed is None else control_seed
-    P_U, q_tilde = apply_control(prior.P_U, prior.q_tilde, control, seed)
-    return dataclasses.replace(prior, P_U=P_U, q_tilde=q_tilde)
+    U_k, q_tilde = apply_control(prior.U_k, prior.q_tilde, control, seed)
+    return dataclasses.replace(prior, U_k=U_k, q_tilde=q_tilde)
 
 
 def _make_optimizer(model: nn.Module, cfg: DefaultConfig) -> torch.optim.Optimizer:
@@ -142,7 +142,7 @@ def fit(
             opt.zero_grad()
             loss.backward()
             opt.step()
-            last = {**breakdown, **model.train_diagnostics(out, omega)}
+            last = {**breakdown, **model.diagnostics(out, omega)}
 
         last["epoch"] = epoch
         history.append(last)
@@ -218,7 +218,7 @@ def main(argv: Optional[List[str]] = None) -> None:
     model = SSAECFRv3(
         run_cfg,
         outcome_type=dataset.outcome_type,
-        P_U=None if prior is None else prior.P_U,
+        U_k=None if prior is None else prior.U_k,
         q_tilde=None if prior is None else prior.q_tilde,
     )
     print(

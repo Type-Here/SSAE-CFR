@@ -2,7 +2,7 @@
 
     x_std  --> empirical --> mu, u --> x_hat        (L_rec on u ONLY)
                               |
-    P_U x_std --> u_adapter --> c ---+
+    U_k^T x_std --> u_adapter --> c -+
                               |      +--> u_shared = u + r_U * c   (MMD acts HERE)
     (x_ij, q~_j) --> w_adapter --> a_W               |
                                                       +--> u_out = u_shared + r_W * a_W
@@ -63,7 +63,7 @@ class SSAECFRv3(nn.Module):
         outcome_type: str = "continuous",
         y_loc: float = 0.0,
         y_scale: float = 1.0,
-        P_U: Optional[Tensor] = None,
+        U_k: Optional[Tensor] = None,
         q_tilde: Optional[Tensor] = None,
     ) -> None:
         super().__init__()
@@ -90,27 +90,27 @@ class SSAECFRv3(nn.Module):
         self.heads = OutcomeHeads(cfg.d_u, cfg.head_hidden, cfg.activation, cfg.batchnorm)
         self.reliability = FixedReliability(cfg.r_U, cfg.r_W)
 
-        self.u_adapter = self._build_u_adapter(cfg, m, P_U)
+        self.u_adapter = self._build_u_adapter(cfg, m, U_k)
         self.w_adapter = self._build_w_adapter(cfg, m, q_tilde)
 
     @staticmethod
     def _build_u_adapter(
-        cfg: DefaultConfig, m: int, P_U: Optional[Tensor]
+        cfg: DefaultConfig, m: int, U_k: Optional[Tensor]
     ) -> Optional[UStructuralAdapter]:
         if not cfg.use_u_adapter:
             return None
-        if P_U is None:
+        if U_k is None:
             raise ValueError(
-                f"model_variant={cfg.model_variant!r} requires the U branch (P_U) "
-                "but P_U was not given; a silently-ignored flag would make this run "
+                f"model_variant={cfg.model_variant!r} requires the U branch (U_k) "
+                "but U_k was not given; a silently-ignored flag would make this run "
                 "indistinguishable from the empirical variant"
             )
-        P_U_t = torch.as_tensor(P_U, dtype=torch.float32)
-        if P_U_t.dim() != 2 or P_U_t.shape[0] != P_U_t.shape[1]:
-            raise ValueError(f"P_U must be square (m, m); got shape {tuple(P_U_t.shape)}")
-        if P_U_t.shape[0] != m:
-            raise ValueError(f"P_U is {P_U_t.shape[0]}x{P_U_t.shape[0]} but cfg.in_channels={m}")
-        return UStructuralAdapter(P_U_t, cfg.d_u, cfg.u_adapter_hidden, cfg.activation, cfg.batchnorm)
+        U_k_t = torch.as_tensor(U_k, dtype=torch.float32)
+        if U_k_t.dim() != 2:
+            raise ValueError(f"U_k must be 2-D (m, k_U); got shape {tuple(U_k_t.shape)}")
+        if U_k_t.shape[0] != m:
+            raise ValueError(f"U_k has {U_k_t.shape[0]} rows but cfg.in_channels={m}")
+        return UStructuralAdapter(U_k_t, cfg.d_u, cfg.u_adapter_hidden, cfg.activation, cfg.batchnorm)
 
     @staticmethod
     def _build_w_adapter(
@@ -205,22 +205,13 @@ class SSAECFRv3(nn.Module):
         """`u_shared`: the MMD acts after the U correction, before the W correction."""
         return out["u_shared"]
 
-    def train_diagnostics(self, out: Dict[str, Tensor], omega: float) -> dict:
-        """Per-batch watch numbers, `omega` included, for the training loop's log line."""
-        return {
-            "omega": omega,
-            "u_norm": _mean_norm(out["u"]),
-            "u_shared_norm": _mean_norm(out["u_shared"]),
-            "u_out_norm": _mean_norm(out["u_out"]),
-            "c_norm": _mean_norm(out["c"]),
-            "a_W_norm": _mean_norm(out["a_W"]),
-            "r_U": _mean_scalar(out["r_U"]),
-            "r_W": _mean_scalar(out["r_W"]),
-        }
+    def diagnostics(self, out: Dict[str, Tensor], omega: Optional[float] = None) -> dict:
+        """Representation norms for a forward pass: a training batch or a scored split.
 
-    def split_diagnostics(self, out: Dict[str, Tensor]) -> dict:
-        """The same norms as `train_diagnostics`, without `omega` - used on a scored split."""
-        return {
+        `omega` is the training loop's noise amplitude, which a scored split has no
+        equivalent of; left None it is simply absent from the result.
+        """
+        scores = {
             "u_norm": _mean_norm(out["u"]),
             "u_shared_norm": _mean_norm(out["u_shared"]),
             "u_out_norm": _mean_norm(out["u_out"]),
@@ -229,6 +220,9 @@ class SSAECFRv3(nn.Module):
             "r_U": _mean_scalar(out["r_U"]),
             "r_W": _mean_scalar(out["r_W"]),
         }
+        if omega is not None:
+            scores["omega"] = omega
+        return scores
 
     def format_epoch(self, last: dict) -> str:
         """A compact one-line summary of the norms, for the training loop's log line."""

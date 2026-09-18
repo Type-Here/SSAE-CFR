@@ -11,14 +11,15 @@ Usage
 
 `DefaultConfig` is a single flat dataclass for one training run: an unfiltered empirical
 host (encoder -> u -> decoder) plus two optional, additive corrections - U (structural,
-from P_U x_std) and W (semantic, from per-feature value x semantics) - fused into
+from U_k^T x_std) and W (semantic, from per-feature value x semantics) - fused into
 `u_shared` (where the MMD acts) and `u_out` (what the causal heads read).
 
 Field notes
 -----------
 - `d_u` is the empirical bottleneck - the size of the empirical code and of the U/W
   corrections added to it, since they are summed.
-- `k_U` is the rank of the covariate-space projector `P_U`; `r_W_rank` the rank of the
+- `k_U` is the rank of the covariate-space basis `U_k` (equivalently of the projector
+  `P_U = U_k U_k^T`, which the U branch no longer forms); `r_W_rank` the rank of the
   semantic-space projector `W_r`, independent of `k_U`. `k_U = None` means "choose
   automatically" via `choose_k_svd` using the `energy_threshold` / `retention_floor` /
   `protected` knobs below; `r_W_rank = None` defaults to `k_U` (first benchmark default,
@@ -94,14 +95,14 @@ class DefaultConfig:
     batchnorm: bool = False
 
     # -- adapter capacities -----------------------------------------------------
-    u_adapter_hidden: Sequence[int] = (32,)  # A_U: P_U x_std -> ... -> d_u
+    u_adapter_hidden: Sequence[int] = (32,)  # A_U: U_k^T x_std -> ... -> d_u
     d_token: int = 32                        # per-feature token width for phi
     phi_hidden: Sequence[int] = (32,)        # phi: [x_ij, q~_j, x_ij*q~_j] -> ... -> d_token
     d_s: int = 32                            # pooled-set summary width
     rho_hidden: Sequence[int] = (32,)        # rho: d_token -> ... -> d_s
 
     # -- prior ranks (independent) ----------------------------------------------
-    k_U: Optional[int] = None                # rank of P_U; None => choose_k_svd (auto)
+    k_U: Optional[int] = None                # rank of U_k; None => choose_k_svd (auto)
     r_W_rank: Optional[int] = None           # rank of W_r; None => equal to k_U (first default only)
     energy_threshold: float = 0.90           # explained-variance fraction
     retention_floor: float = 0.5             # min diag(P_U) for protected covariates

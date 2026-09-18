@@ -4,6 +4,11 @@ Resolves a dataset name (or an explicit path) to its `prior_bundle.npz`, checks 
 bundle's covariate order against the dataset's own `feature_names`, and returns the
 prior objects the model needs as torch tensors. No nn.Module, no config coupling -
 wiring these tensors into the U/W adapters happens where the model is assembled.
+
+The U branch consumes the basis `U_k`, not the projector `P_U = U_k U_k^T`: the
+adapter reads the k_U coordinates `U_k^T x` rather than their embedding back into
+R^m. Same subspace, same information, k_U inputs instead of m. `P_U` stays in the
+bundle for the offline retention diagnostics, which are about covariate space.
 """
 
 from __future__ import annotations
@@ -25,7 +30,7 @@ PathLike = Union[str, Path]
 class PriorTensors:
     """The prior objects the model consumes, as float32 torch tensors."""
 
-    P_U: Tensor           # (m, m)
+    U_k: Tensor           # (m, k_U)
     q_tilde: Tensor        # (m, r_W_rank)
     k_U: int
     r_W_rank: int
@@ -81,7 +86,7 @@ def load_prior_tensors(
     _check_feature_order(bundle.feature_names, feature_names)
 
     return PriorTensors(
-        P_U=torch.as_tensor(bundle.P_U, dtype=torch.float32),
+        U_k=torch.as_tensor(bundle.U_k, dtype=torch.float32),
         q_tilde=torch.as_tensor(bundle.Q_tilde, dtype=torch.float32),
         k_U=bundle.k_U,
         r_W_rank=bundle.r_W_rank,

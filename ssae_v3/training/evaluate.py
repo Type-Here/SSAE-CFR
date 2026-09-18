@@ -95,7 +95,12 @@ def _forward_eval(model: SSAECFRv3, ds: Dataset) -> Dict[str, np.ndarray]:
     out = model(x, t, omega=0.0)
     if was_training:
         model.train()
-    return {key: value.detach().cpu().numpy() for key, value in out.items()}
+    # np.asarray, not .detach(): the reliability entries may be plain python scalars
+    # rather than tensors, and the harness should read them either way.
+    return {
+        key: (value.detach().cpu().numpy() if isinstance(value, torch.Tensor) else np.asarray(value))
+        for key, value in out.items()
+    }
 
 
 def _potential_outcomes(
@@ -115,6 +120,25 @@ def _potential_outcomes(
         to_outcome_scale(y0, outcome_type, loc, scale),
         to_outcome_scale(y1, outcome_type, loc, scale),
     )
+
+
+def _factual_from_potentials(
+    y0: np.ndarray, y1: np.ndarray, ds: Dataset, y_scale: float, normalized: bool
+) -> float:
+    """The factual loss given potential outcomes already predicted for `ds`.
+
+    Split out so a caller that has just run a forward pass does not have to run a
+    second one; `factual_objective` is the standalone entry point.
+    """
+    t = np.asarray(ds.t, dtype=np.float64)
+    yf_hat = t * y1 + (1.0 - t) * y0
+    if ds.outcome_type == "binary":
+        p = np.clip(yf_hat, 1e-7, 1.0 - 1e-7)
+        return float(-np.mean(ds.yf * np.log(p) + (1.0 - ds.yf) * np.log(1.0 - p)))
+    mse = float(np.mean((yf_hat - ds.yf) ** 2))
+    if not normalized:
+        return mse
+    return mse / (y_scale ** 2) if y_scale > 0.0 else float("nan")
 
 
 def factual_objective(model: SSAECFRv3, ds: Dataset, normalized: bool = False) -> float:
@@ -139,16 +163,8 @@ def factual_objective(model: SSAECFRv3, ds: Dataset, normalized: bool = False) -
         return float("nan")
     out = _forward_eval(model, ds)
     y0, y1 = _potential_outcomes(out, ds.outcome_type, *model.outcome_affine)
-    t = np.asarray(ds.t, dtype=np.float64)
-    yf_hat = t * y1 + (1.0 - t) * y0
-    if ds.outcome_type == "binary":
-        p = np.clip(yf_hat, 1e-7, 1.0 - 1e-7)
-        return float(-np.mean(ds.yf * np.log(p) + (1.0 - ds.yf) * np.log(1.0 - p)))
-    mse = float(np.mean((yf_hat - ds.yf) ** 2))
-    if not normalized:
-        return mse
     _, y_scale = model.outcome_affine
-    return mse / (y_scale ** 2) if y_scale > 0.0 else float("nan")
+    return _factual_from_potentials(y0, y1, ds, y_scale, normalized)
 
 
 _FINAL_DIAGNOSTIC_KEYS = (
@@ -238,6 +254,7 @@ def score_split(model: SSAECFRv3, ds: Dataset, benefit: bool, seed: int = 0) -> 
     # The balance metric has to be read off the representation the MMD actually
     # acted on - scoring any other code measures nothing.
     balance_code = model.balance_representation(out)
+    _, y_scale = model.outcome_affine
 
     scores: Dict[str, float] = {
         "n": float(ds.n),
@@ -247,8 +264,18 @@ def score_split(model: SSAECFRv3, ds: Dataset, benefit: bool, seed: int = 0) -> 
         # Guard against balance-by-collapse: a representation shrunk to zero scores
         # perfectly here while carrying no information, so the norm qualifies the score.
         "balance_norm": float(np.linalg.norm(balance_code, axis=-1).mean()),
+        # Both readings are kept: the raw MSE is in the outcome's own units and is the
+        # meaningful one on a single dataset, the normalized one is what survives
+        # averaging across splits whose outcome scales differ. Selection uses the
+        # normalized key. A binary cross-entropy is already scale-free, so the two
+        # coincide there and only the raw key is emitted.
+        "factual_objective": _factual_from_potentials(y0, y1, ds, y_scale, False),
     }
-    scores.update(model.split_diagnostics(out))
+    if ds.outcome_type != "binary":
+        scores["factual_objective_normalized"] = _factual_from_potentials(
+            y0, y1, ds, y_scale, True
+        )
+    scores.update(model.diagnostics(out))
 
     if ds.has_oracle:
         tau_true = ds.tau_true
@@ -309,26 +336,18 @@ def fit_and_score(
         outcome_type=train.outcome_type,
         y_loc=y_loc,
         y_scale=y_scale,
-        P_U=None if prior is None else prior.P_U,
+        U_k=None if prior is None else prior.U_k,
         q_tilde=None if prior is None else prior.q_tilde,
     )
     history = fit(model, train, run_cfg, verbose=verbose, val=val)
 
-    scores = {f"in_{k}": v for k, v in score_split(model, train, benefit, seed).items()}
-    scores.update({f"out_{k}": v for k, v in score_split(model, test, benefit, seed).items()})
-    # Both readings are kept: raw MSE is in the outcome's own units and is the
-    # meaningful one on a single dataset, the normalized one is what survives averaging
-    # across splits whose outcome scales differ. Selection uses the normalized key.
-    splits_to_score = [("in", train), ("out", test)]
-    if val is not None and val.n > 0:
-        scores.update({f"val_{k}": v for k, v in score_split(model, val, benefit, seed).items()})
-        splits_to_score.append(("val", val))
-    for prefix, split in splits_to_score:
-        scores[f"{prefix}_factual_objective"] = factual_objective(model, split)
-        if split.outcome_type != "binary":
-            scores[f"{prefix}_factual_objective_normalized"] = factual_objective(
-                model, split, normalized=True
-            )
+    scores: Dict[str, float] = {}
+    for prefix, split in (("in", train), ("val", val), ("out", test)):
+        if split is None:
+            continue
+        scores.update(
+            {f"{prefix}_{k}": v for k, v in score_split(model, split, benefit, seed).items()}
+        )
     scores["treated_fraction_train"] = treated_fraction(train) or float("nan")
     scores["treated_fraction_test"] = treated_fraction(test) or float("nan")
     scores.update(final_training_diagnostics(history))

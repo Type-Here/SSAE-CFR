@@ -24,7 +24,7 @@ from ..hparams import DefaultConfig, MODEL_VARIANTS, load_config
 from ..prior_modules.controls import CONTROLS
 from ..utils.split import train_val_test_indices
 from ..utils.standardize import standardize_dataset
-from .evaluate import aggregate, factual_objective, fit_and_score, score_split
+from .evaluate import aggregate, fit_and_score, score_split
 
 DEFAULT_VAL_FRACTION = 0.3  # of the 672 training units => 63/27/10 of the whole
 
@@ -92,8 +92,16 @@ def run_realization(
     seed: int = 0,
     verbose: bool = False,
     control: str = "none",
+    control_seed: Optional[int] = None,
 ) -> Dict[str, float]:
-    """Fit and score one realization; keys prefixed `in_` / `val_` / `pool_` / `out_`."""
+    """Fit and score one realization; keys prefixed `in_` / `val_` / `pool_` / `out_`.
+
+    `control_seed` picks which draw of a negative control this run uses; left None it
+    is `cfg.seed`, which is held fixed across realizations, so a control arm is one
+    random draw measured 30 times rather than 30 random draws. That is the right
+    default for pairing but it means a single arm cannot separate the control's
+    distribution from the particular subspace it drew - vary this to do that.
+    """
     torch.manual_seed(seed)
     np.random.seed(seed)
 
@@ -110,13 +118,12 @@ def run_realization(
         seed=seed,
         verbose=verbose,
         control=control,
+        control_seed=control_seed,
     )
     scores.update({f"pool_{k}": v for k, v in score_split(model, pool_split, True, seed).items()})
-    scores["pool_factual_objective"] = factual_objective(model, pool_split)
-    scores["pool_factual_objective_normalized"] = factual_objective(
-        model, pool_split, normalized=True
-    )
     scores["realization"] = float(realization)
+    if control_seed is not None:
+        scores["control_seed"] = float(control_seed)
     return scores
 
 
@@ -161,29 +168,18 @@ def _arm_config(base: DefaultConfig, variant: str) -> DefaultConfig:
     switching the variant does not restore them. Left at zero the correction is
     multiplied by zero, so no gradient ever reaches the adapter and its zero-initialized
     final layer never moves: the arm trains as the empirical model while claiming to be
-    a semantic one. Restoring the default here is what keeps a ladder rung from being
-    silently inert.
+    a semantic one. Reviving a zeroed constant here is what keeps a ladder rung from
+    being silently inert; `_resolve_variant` re-zeroes whichever branch this rung does
+    not use, so nothing turns a branch on by accident either.
     """
-    cfg = dataclasses.replace(
-        base, model_variant=variant, use_u_adapter=None, use_w_adapter=None
-    )
-    # The declared field defaults, not DefaultConfig(): a constructed instance defaults
-    # to the empirical variant, whose own resolve zeroes both constants.
-    declared = {f.name: f.default for f in dataclasses.fields(DefaultConfig)}
-    r_U = cfg.r_U if cfg.r_U > 0.0 else declared["r_U"]
-    r_W = cfg.r_W if cfg.r_W > 0.0 else declared["r_W"]
-    cfg = dataclasses.replace(
-        cfg,
-        r_U=r_U if cfg.use_u_adapter else 0.0,
-        r_W=r_W if cfg.use_w_adapter else 0.0,
+    return dataclasses.replace(
+        base,
+        model_variant=variant,
         use_u_adapter=None,
         use_w_adapter=None,
+        r_U=base.r_U if base.r_U > 0.0 else 1.0,
+        r_W=base.r_W if base.r_W > 0.0 else 1.0,
     )
-    if cfg.use_u_adapter and cfg.r_U == 0.0:
-        raise ValueError(f"variant {variant!r} enables the U branch but r_U is 0 (inert arm)")
-    if cfg.use_w_adapter and cfg.r_W == 0.0:
-        raise ValueError(f"variant {variant!r} enables the W branch but r_W is 0 (inert arm)")
-    return cfg
 
 
 def run_ladder(
