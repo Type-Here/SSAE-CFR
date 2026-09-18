@@ -24,7 +24,12 @@ Field notes
   `protected` knobs below; `r_W_rank = None` defaults to `k_U` (first benchmark default,
   not a claim that the two ranks should match).
 - `r_U`, `r_W` are the reliability constants that scale the U and W corrections before
-  they are added to the empirical code. Fixed, not learned, in this version.
+  they are added to the empirical code. Fixed, not learned, in this version. A branch
+  that is off forces its constant to 0.0; switching `model_variant` on an existing
+  config (e.g. `dataclasses.replace`) does NOT restore it, and a live branch left at 0
+  is inert - its correction is multiplied by zero, so no gradient reaches the adapter
+  and its zero-initialized final layer never moves. Set them explicitly when deriving
+  one variant's config from another's.
 - `model_variant` is the position on the experiment ladder. It is convenience sugar over
   `use_u_adapter` / `use_w_adapter`; see `_resolve_variant` for how the three interact.
 - `l1_target`: `"u"` (default) is the empirical code the L1 acts on; `"mu"` is its
