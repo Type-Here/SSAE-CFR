@@ -103,7 +103,7 @@ class SSAECFRv3(nn.Module):
             raise ValueError(
                 f"model_variant={cfg.model_variant!r} requires the U branch (P_U) "
                 "but P_U was not given; a silently-ignored flag would make this run "
-                "indistinguishable from M0"
+                "indistinguishable from the empirical variant"
             )
         P_U_t = torch.as_tensor(P_U, dtype=torch.float32)
         if P_U_t.dim() != 2 or P_U_t.shape[0] != P_U_t.shape[1]:
@@ -122,7 +122,7 @@ class SSAECFRv3(nn.Module):
             raise ValueError(
                 f"model_variant={cfg.model_variant!r} requires the W branch (q_tilde) "
                 "but q_tilde was not given; a silently-ignored flag would make this "
-                "run indistinguishable from M0"
+                "run indistinguishable from the empirical variant"
             )
         q_tilde_t = torch.as_tensor(q_tilde, dtype=torch.float32)
         if q_tilde_t.dim() != 2:

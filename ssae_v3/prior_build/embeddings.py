@@ -31,8 +31,8 @@ def _load_model(model_name: str, device: str, dtype: str):
     is not always the one asked for once the weights have been dispatched.
 
     Two memory problems, only one of them obvious. Width: a 7B model at float32 is
-    about 28 GB of weights, so on GPU we default to float16 (the release width); on
-    CPU we stay float32, where float16 is slow and unsupported for some ops.
+    about 28 GB of weights, so GPU defaults to float16 (the release width) and CPU
+    stays float32, where float16 is slow and unsupported for some ops.
 
     Placement: `from_pretrained(...).to(device)` still materializes the whole model
     in CPU RAM before moving it, which OOMs a host whose RAM is smaller than the

@@ -124,7 +124,7 @@ def factual_objective(model: SSAECFRv3, ds: Dataset, normalized: bool = False) -
     honest alternative: how well the model predicts the outcome it actually observed,
     on data it was not fit on. Lower is better.
 
-    Read it as a filter, not a ranking: it scores each unit only on the arm that unit
+    A filter, not a ranking: it scores each unit only on the arm that unit
     actually received, so one term of `tau = y1 - y0` is left completely
     unconstrained per unit, and the counterfactual head is least constrained exactly
     where overlap is worst - which on IHDP is where the difficulty was manufactured.
@@ -245,7 +245,7 @@ def score_split(model: SSAECFRv3, ds: Dataset, benefit: bool, seed: int = 0) -> 
         "tau_sd": float(tau_hat.std()),
         "smd_reduction": smd_reduction(ds.x, balance_code, ds.t),
         # Guard against balance-by-collapse: a representation shrunk to zero scores
-        # perfectly here and carries no information. Read the two together.
+        # perfectly here while carrying no information, so the norm qualifies the score.
         "balance_norm": float(np.linalg.norm(balance_code, axis=-1).mean()),
     }
     scores.update(model.split_diagnostics(out))
@@ -317,9 +317,8 @@ def fit_and_score(
     scores = {f"in_{k}": v for k, v in score_split(model, train, benefit, seed).items()}
     scores.update({f"out_{k}": v for k, v in score_split(model, test, benefit, seed).items()})
     # Both readings are kept: raw MSE is in the outcome's own units and is the
-    # meaningful one on a single dataset, the normalized one is what can be averaged
-    # or compared across splits whose outcome scales differ. Select on the normalized
-    # key - see `factual_objective`.
+    # meaningful one on a single dataset, the normalized one is what survives averaging
+    # across splits whose outcome scales differ. Selection uses the normalized key.
     splits_to_score = [("in", train), ("out", test)]
     if val is not None and val.n > 0:
         scores.update({f"val_{k}": v for k, v in score_split(model, val, benefit, seed).items()})

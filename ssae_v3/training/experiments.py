@@ -32,7 +32,7 @@ DEFAULT_VAL_FRACTION = 0.3  # of the 672 training units => 63/27/10 of the whole
 # --config to None instead would silently fall back to the bare dataclass defaults.
 DEFAULT_CONFIG = Path(__file__).resolve().parents[1] / "config" / "ihdp.yaml"
 
-# Published results under this protocol, for orientation while reading our output.
+# Published results under this protocol, for orientation only.
 # Shalit, Johansson and Sontag (2017), Table 1: 1000 realizations, 63/27/10 splits.
 # Values are mean of sqrt(PEHE) and of eps_ATE.
 REFERENCE_RESULTS: Dict[str, Dict[str, float]] = {
@@ -46,12 +46,12 @@ REFERENCE_RESULTS: Dict[str, Dict[str, float]] = {
 REFERENCE_SOURCE = "Shalit et al. 2017, Table 1 (1000 realizations, 63/27/10)"
 
 # Printed under the reference rows so the table is never mistaken for a like-for-like
-# comparison: 1000 tuned realizations in another codebase against ours, untuned. PEHE
+# comparison: 1000 tuned realizations in another codebase against this one, untuned. PEHE
 # is heavy-tailed across realizations, so an unpaired difference of means between
 # codebases is decided largely by which realizations each side drew.
 REFERENCE_CAVEAT = (
     "  ^ orientation only, not a like-for-like comparison: 1000 tuned realizations in\n"
-    "    another codebase vs ours, untuned. PEHE is heavy-tailed across realizations,\n"
+    "    another codebase vs this one, untuned. PEHE is heavy-tailed across realizations,\n"
     "    so unpaired cross-codebase means do not support a claim."
 )
 
@@ -131,8 +131,8 @@ def run_benchmark(
 ) -> Tuple[Dict[str, Dict[str, float]], List[Dict[str, float]]]:
     """Run one fit per realization; return (aggregate summary, per-realization scores).
 
-    `seed` is held fixed across realizations on purpose: the spread reported should be
-    the benchmark's own variability, not ours added on top of it.
+    `seed` is held fixed across realizations on purpose: the reported spread is then
+    the benchmark's own variability, with no extra run-to-run variance added.
     """
     if not has_replication_set():
         raise FileNotFoundError(
@@ -211,7 +211,8 @@ def run_ladder(
             raise ValueError(f"unknown control {control!r}; choose from {CONTROLS}")
 
     # The real arm always runs: controls are additional arms, never a replacement. A
-    # table of control arms with no arm they control, or with no baseline, cannot be read.
+    # table of control arms without the arms they control, or without a baseline, is
+    # uninterpretable.
     controls = ("none",) + tuple(c for c in controls if c != "none")
 
     rows: Dict[str, List[Dict[str, float]]] = {}
@@ -253,13 +254,12 @@ def format_ladder(
 ) -> str:
     """The ladder table: one row per arm, each control directly under what it controls.
 
-    Read the median, not the mean: 10 of 100 realizations carry 46% of the summed
-    out-PEHE and std(y) runs 1.81-39.11 across realizations, so the mean describes the
-    few realizations that drew the largest outcomes. The win column is paired against
-    the baseline arm on the same realizations.
-
-    `|u_shared|` sits beside the SMD reduction because a representation is perfectly
-    balanced once shrunk to zero: a balance gain with a collapsing norm is not one.
+    The median leads because 10 of 100 realizations carry 46% of the summed out-PEHE
+    and std(y) runs 1.81-39.11 across them, so the mean describes the few realizations
+    that drew the largest outcomes. The win column is paired against the baseline arm
+    on the same realizations. `|u_shared|` sits beside the SMD reduction because a
+    representation is perfectly balanced once shrunk to zero, so a balance gain with a
+    collapsing norm is not one.
     """
     n = len(next(iter(rows.values()))) if rows else 0
     lines = [
@@ -289,7 +289,7 @@ def format_ladder(
             f"{med(label, 'pool_balance_norm'):>12.3f}"
         )
         # An arm whose branch is on but whose correction never left zero trained as the
-        # empirical model. It must not be read as a semantic result.
+        # empirical model, so its scores carry no semantic content.
         if not label.startswith("empirical"):
             corrections = med(label, "pool_c_norm") + med(label, "pool_a_W_norm")
             if np.isfinite(corrections) and corrections == 0.0:
@@ -343,7 +343,7 @@ def format_loss_budget(summary: Dict[str, Dict[str, float]]) -> str:
 
 
 def format_benchmark(summary: Dict[str, Dict[str, float]], n_realizations: int) -> str:
-    """The comparison table: our numbers over the published ones, same protocol."""
+    """The comparison table: this run over the published rows, same protocol."""
     lines = [
         f"IHDP benchmark - {n_realizations} realization(s), fixed 672/75 partition",
         "-" * 74,
@@ -391,10 +391,10 @@ def format_benchmark(summary: Dict[str, Dict[str, float]], n_realizations: int) 
         ("val_factual_objective_normalized", "val factual MSE (norm)"),
         ("pool_smd_reduction", "SMD reduction (pool)"),
         ("out_smd_reduction", "SMD reduction (out)"),
-        # Always read next to the SMD reduction above it.
+        # Qualifies the SMD reduction above it: balance is free at zero norm.
         ("pool_balance_norm", "|u_shared| (pool)"),
-        # Exactly zero on the empirical variant by construction, which is why they are
-        # printed on every rung rather than only the semantic ones.
+        # Exactly zero on the empirical variant by construction, so printing them on
+        # every rung makes an inert semantic branch visible.
         ("pool_c_norm", "|c| structural (pool)"),
         ("pool_a_W_norm", "|a_W| semantic (pool)"),
         ("pool_ate_hat", "ATE hat (pool)"),

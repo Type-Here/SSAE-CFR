@@ -52,10 +52,10 @@ import yaml
 NOISE_TYPES = ("gaussian", "laplace")
 NOISE_SCALES = ("absolute", "relative")
 MODEL_VARIANTS = (
-    "empirical",    # M0: host only
-    "u_adapter",    # M1: host + U
-    "w_adapter",    # M2: host + W
-    "u_w_adapter",  # M3: host + U + W
+    "empirical",    # host only
+    "u_adapter",    # host + U
+    "w_adapter",    # host + W
+    "u_w_adapter",  # host + U + W
 )
 
 # model_variant -> (use_u_adapter, use_w_adapter)
