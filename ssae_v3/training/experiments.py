@@ -308,6 +308,180 @@ def format_ladder(
     return "\n".join(lines)
 
 
+# -- the W-semantics sweep ---------------------------------------------------
+
+# What each arm feeds the W branch's per-feature table, as (control, trainable). The
+# question the sweep asks is not "does W help" (that is the ladder's job) but "does the
+# LLM's geometry of meaning matter, or would any per-feature code do".
+#
+#   W_real        the built prior, q_j = W_r^T v_j from the BioMistral glosses
+#   W_random      a random table at the same shape and the same RMS: the same capacity,
+#                 the same per-feature distinctness, none of the relations between
+#                 features
+#   W_onehot      a scaled identity: feature j means "I am feature j" and nothing more -
+#                 the floor, the adapter knowing only which column it is reading
+#   W_learned_id  the same random table, but trainable: what the outcome loss can invent
+#                 for itself when nothing is given to it
+#
+# phi, rho, pooling and d_u are identical across all four. Two things cannot be matched
+# and are reported instead of being hidden: W_onehot needs m columns where the others
+# need r_W (m one-hots do not fit in R^{r_W}), which widens phi's first layer; and
+# W_learned_id adds m * r_W trainable parameters by construction.
+W_SEMANTICS_ARMS: Dict[str, Tuple[str, bool]] = {
+    "W_real": ("none", False),
+    "W_random": ("random_semantics", False),
+    "W_onehot": ("onehot_semantics", False),
+    "W_learned_id": ("random_semantics", True),
+}
+
+# Offset applied to the realization index to pick each realization's control draw. Any
+# fixed value would do; what matters is that it varies with the realization.
+CONTROL_SEED_BASE = 1000
+
+
+def _w_arm_config(base: DefaultConfig, trainable: bool) -> DefaultConfig:
+    """`base` retargeted at the w_adapter rung, with the semantic table frozen or learned."""
+    arm = _arm_config(base, "w_adapter")
+    return dataclasses.replace(arm, w_semantics_trainable=trainable)
+
+
+def w_adapter_param_counts(
+    base: DefaultConfig,
+    prior_path: Optional[str] = None,
+    arms: Optional[Dict[str, Tuple[str, bool]]] = None,
+) -> Dict[str, int]:
+    """Trainable parameters in the W branch alone, per arm.
+
+    Built rather than derived, so the number is the one the optimizer actually sees.
+    Printed with the sweep because two of the four arms cannot be capacity-matched to
+    the real one and a reader has to be able to see by how much.
+    """
+    from ..prior_modules.controls import apply_control
+    from ..prior_modules.loader import load_prior_tensors
+    from ..prior_modules.w_adapter import WSemanticAdapter
+
+    arms = W_SEMANTICS_ARMS if arms is None else arms
+    reference = load_ihdp_realization(1, "train")
+    prior = load_prior_tensors(reference.feature_names, dataset=base.dataset, path=prior_path)
+
+    counts: Dict[str, int] = {}
+    for name, (control, trainable) in arms.items():
+        _, q_tilde = apply_control(None, prior.q_tilde, control, CONTROL_SEED_BASE)
+        cfg = _w_arm_config(base, trainable)
+        adapter = WSemanticAdapter(
+            q_tilde, cfg.d_u, cfg.d_token, cfg.phi_hidden, cfg.d_s, cfg.rho_hidden,
+            cfg.activation, cfg.batchnorm, cfg.w_semantics_trainable,
+        )
+        counts[name] = sum(p.numel() for p in adapter.parameters() if p.requires_grad)
+    return counts
+
+
+def run_w_semantics_sweep(
+    realizations: Sequence[int] = tuple(range(1, 31)),
+    arms: Optional[Dict[str, Tuple[str, bool]]] = None,
+    cfg: Optional[DefaultConfig] = None,
+    prior_path: Optional[str] = None,
+    val_fraction: float = DEFAULT_VAL_FRACTION,
+    seed: int = 0,
+    verbose: bool = False,
+    include_empirical: bool = True,
+) -> Tuple[Dict[str, List[Dict[str, float]]], Dict[str, Dict[str, Dict[str, float]]]]:
+    """Run every W-semantics arm on the same realizations, paired.
+
+    The empirical host runs first as the reference the whole sweep is read against: an
+    arm that does not beat it has nothing to explain.
+
+    Each realization draws its own control seed (`CONTROL_SEED_BASE + realization`), so
+    the stochastic arms are an ensemble of draws rather than one draw scored once per
+    realization. That is a deliberate departure from `run_ladder`, where the control seed
+    is `cfg.seed` and therefore fixed: a single subspace measured N times cannot tell its
+    own luck from its arm's behaviour, and the spread between draws was measured to be
+    wider than the effects being reported.
+    """
+    base = cfg if cfg is not None else load_config(str(DEFAULT_CONFIG))
+    arms = W_SEMANTICS_ARMS if arms is None else arms
+
+    plan: List[Tuple[str, DefaultConfig, str]] = []
+    if include_empirical:
+        plan.append(("empirical", _arm_config(base, "empirical"), "none"))
+    for name, (control, trainable) in arms.items():
+        plan.append((name, _w_arm_config(base, trainable), control))
+
+    rows: Dict[str, List[Dict[str, float]]] = {}
+    summaries: Dict[str, Dict[str, Dict[str, float]]] = {}
+    for label, arm_cfg, control in plan:
+        runs = [
+            run_realization(
+                r, arm_cfg, prior_path, val_fraction, seed, verbose, control,
+                control_seed=CONTROL_SEED_BASE + r,
+            )
+            for r in realizations
+        ]
+        rows[label] = runs
+        summaries[label] = aggregate(runs)
+    return rows, summaries
+
+
+def format_w_sweep(
+    rows: Dict[str, List[Dict[str, float]]],
+    summaries: Dict[str, Dict[str, Dict[str, float]]],
+    param_counts: Optional[Dict[str, int]] = None,
+    baseline: str = "empirical",
+    reference: str = "W_real",
+) -> str:
+    """The W-semantics table: one row per arm, with both paired win columns.
+
+    Two comparisons, because one alone is not enough to conclude anything. `vs host` is
+    whether the arm buys anything over the empirical model, and `vs real` is whether the
+    real prior's geometry is doing the buying - an arm that matches W_real means the LLM
+    contributed nothing that a table of that shape could not.
+    """
+    n = len(next(iter(rows.values()))) if rows else 0
+    lines = [
+        f"W semantics sweep - {n} paired realization(s), fixed 672/75 partition",
+        "-" * 103,
+        f"{'arm':<15}{'out PEHE med':>13}{'mean':>8}{'vs host':>9}{'vs real':>9}"
+        f"{'out epsATE':>12}{'SMD red':>9}{'|a_W|':>9}{'W params':>10}",
+    ]
+
+    def stat(label: str, key: str, field: str) -> float:
+        entry = summaries[label].get(key)
+        return float("nan") if entry is None else entry[field]
+
+    base_runs = rows.get(baseline)
+    real_runs = rows.get(reference)
+    inert: List[str] = []
+    for label in rows:
+        vs_host = "-"
+        if base_runs is not None and label != baseline:
+            vs_host = _paired_wins(rows[label], base_runs, "out_pehe")
+        vs_real = "-"
+        if real_runs is not None and label not in (baseline, reference):
+            vs_real = _paired_wins(rows[label], real_runs, "out_pehe")
+        params = "-" if param_counts is None else str(param_counts.get(label, "-"))
+        lines.append(
+            f"{label:<15}{stat(label, 'out_pehe', 'median'):>13.3f}"
+            f"{stat(label, 'out_pehe', 'mean'):>8.3f}{vs_host:>9}{vs_real:>9}"
+            f"{stat(label, 'out_eps_ate', 'median'):>12.3f}"
+            f"{stat(label, 'pool_smd_reduction', 'median'):>9.3f}"
+            f"{stat(label, 'pool_a_W_norm', 'median'):>9.3f}{params:>10}"
+        )
+        if label != baseline and stat(label, "pool_a_W_norm", "median") == 0.0:
+            inert.append(label)
+
+    lines.append("-" * 103)
+    for label in inert:
+        lines.append(f"WARNING {label}: |a_W| is exactly 0 - this arm trained as the empirical model")
+    lines.append(f"vs host = realizations where the arm beats {baseline!r} on out PEHE (lower is better)")
+    lines.append(f"vs real = the same against {reference!r}; a tie there means the LLM geometry is not the cause")
+    lines.append(
+        "W params = trainable parameters in the W branch alone. W_onehot needs m columns\n"
+        "  where the others need r_W, which widens phi's first layer; W_learned_id adds the\n"
+        "  m x r_W table itself. Neither can be matched away - read the win columns against them."
+    )
+    return "\n".join(lines)
+
+
 # -- the single-variant benchmark table -------------------------------------
 
 
@@ -434,6 +608,12 @@ def main(argv: Optional[List[str]] = None) -> None:
         default="none",
         help="comma-separated negative controls to run beside each prior-using arm",
     )
+    parser.add_argument(
+        "--w-sweep",
+        action="store_true",
+        help="run the four W-semantics arms (real / random / one-hot / learned) instead "
+             "of the ladder, paired on the same realizations",
+    )
     parser.add_argument("--val-fraction", type=float, default=DEFAULT_VAL_FRACTION)
     parser.add_argument("--epochs", type=int, default=None)
     parser.add_argument("--seed", type=int, default=0)
@@ -443,6 +623,14 @@ def main(argv: Optional[List[str]] = None) -> None:
     overrides = {} if args.epochs is None else {"epochs": args.epochs}
     cfg = load_config(args.config, **overrides)
     realizations = tuple(range(1, args.realizations + 1))
+
+    if args.w_sweep:
+        rows, summaries = run_w_semantics_sweep(
+            realizations, None, cfg, args.prior, args.val_fraction, args.seed, args.verbose
+        )
+        counts = w_adapter_param_counts(cfg, args.prior)
+        print(format_w_sweep(rows, summaries, counts))
+        return
 
     if args.variants is None:
         summary, _ = run_benchmark(

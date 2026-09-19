@@ -15,7 +15,14 @@ from typing import Optional, Tuple
 import torch
 from torch import Tensor
 
-CONTROLS = ("none", "random_basis", "shuffled_semantics", "random_semantics", "nonsemantic")
+CONTROLS = (
+    "none",
+    "random_basis",
+    "shuffled_semantics",
+    "random_semantics",
+    "onehot_semantics",
+    "nonsemantic",
+)
 
 
 def random_basis(m: int, rank: int, seed: int) -> Tensor:
@@ -65,6 +72,32 @@ def random_semantics(q_tilde: Tensor, seed: int) -> Tensor:
     return (noise * (real_rms / noise_rms)).to(dtype=q_tilde.dtype)
 
 
+def onehot_semantics(q_tilde: Tensor, seed: int = 0) -> Tensor:
+    """A scaled identity (m, m): feature j's "meaning" is the fact that it is feature j.
+
+    The floor of the semantic ladder. The tokenizer still gets a per-feature vector, and
+    the value-semantics interaction x_ij * q~_j still exists, but the vector carries no
+    relation between features at all - two covariates that mean almost the same thing are
+    as far apart as any other pair. Anything the real prior earns over this arm is earned
+    by the geometry of meaning, not by the adapter merely knowing which feature it reads.
+
+    Scaled so the whole matrix has the same root-mean-square as `q_tilde`, which is the
+    magnitude the shared phi sees. Row norms then differ by sqrt(m / r_W) - a one-hot
+    concentrates its mass in one coordinate where the real q~ spreads it over r_W - and
+    that is intrinsic: m distinct one-hots do not fit in R^{r_W} when r_W < m. The
+    dimensionality therefore does NOT match the other controls, and the phi input width
+    (1 + 2 * r_W) changes with it; report the parameter counts beside this arm.
+
+    Deterministic. `seed` is accepted only so the dispatch table can call every semantic
+    control the same way.
+    """
+    m = q_tilde.shape[0]
+    rms = torch.sqrt(torch.mean(q_tilde.to(torch.float64) ** 2))
+    eye = torch.eye(m, dtype=torch.float64)
+    # RMS of I_m is sqrt(1/m), so this factor lands the result exactly on `rms`.
+    return (eye * (rms * float(m) ** 0.5)).to(dtype=q_tilde.dtype)
+
+
 # control -> (replace U_k?, how to replace q_tilde with which seed offset). None means
 # "leave that branch alone". "nonsemantic" is the capacity-matched control: both
 # branches replaced at once, the offset keeping the two draws independent while each
@@ -73,6 +106,7 @@ _DISPATCH = {
     "random_basis": (True, None),
     "shuffled_semantics": (False, (shuffled_semantics, 0)),
     "random_semantics": (False, (random_semantics, 0)),
+    "onehot_semantics": (False, (onehot_semantics, 0)),
     "nonsemantic": (True, (random_semantics, 1)),
 }
 

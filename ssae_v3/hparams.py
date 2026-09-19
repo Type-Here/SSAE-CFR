@@ -100,6 +100,11 @@ class DefaultConfig:
     phi_hidden: Sequence[int] = (32,)        # phi: [x_ij, q~_j, x_ij*q~_j] -> ... -> d_token
     d_s: int = 32                            # pooled-set summary width
     rho_hidden: Sequence[int] = (32,)        # rho: d_token -> ... -> d_s
+    # Ablation only, NOT part of the frozen core: makes the per-feature semantic table a
+    # learned embedding initialized at whatever q~ the run was given, instead of the
+    # frozen offline one. Adds m * r_W trainable parameters, so an arm using it is not
+    # capacity-matched to one that does not.
+    w_semantics_trainable: bool = False
 
     # -- prior ranks (independent) ----------------------------------------------
     k_U: Optional[int] = None                # rank of U_k; None => choose_k_svd (auto)

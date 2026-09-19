@@ -131,7 +131,7 @@ class SSAECFRv3(nn.Module):
             raise ValueError(f"q_tilde has {q_tilde_t.shape[0]} rows but cfg.in_channels={m}")
         return WSemanticAdapter(
             q_tilde_t, cfg.d_u, cfg.d_token, cfg.phi_hidden, cfg.d_s, cfg.rho_hidden,
-            cfg.activation, cfg.batchnorm,
+            cfg.activation, cfg.batchnorm, cfg.w_semantics_trainable,
         )
 
     def forward(self, x: Tensor, t: Tensor, omega: float = 0.0) -> Dict[str, Tensor]:

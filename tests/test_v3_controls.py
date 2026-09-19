@@ -16,6 +16,7 @@ import pytest
 from ssae_v3.prior_modules.controls import (
     CONTROLS,
     apply_control,
+    onehot_semantics,
     random_basis,
     random_semantics,
     shuffled_semantics,
