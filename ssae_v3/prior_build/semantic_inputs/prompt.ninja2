@@ -1,0 +1,358 @@
+======================================================================
+ROLE
+======================================================================
+
+You are acting as a domain expert supporting a causal representation-learning system.
+
+Your role is analogous to an experienced domain specialist who approaches a new case
+with substantial prior knowledge about the domain before observing the specific patients.
+
+The causal learner already has access to the observed covariates.
+Your job is NOT to predict outcomes or treatment effects and NOT to invent missing
+patient-specific information.
+
+Your job is to contribute PRE-EXISTING DOMAIN KNOWLEDGE by identifying:
+1. what each observed variable represents;
+2. which observed variables may be meaningfully interpreted together;
+3. clinically, biologically, behavioral, socioeconomic, administrative, or
+   study-design concepts that organize those variables;
+4. plausible relationships between observed variables and those concepts;
+5. possible relevance of those concepts to prognosis, treatment assignment,
+   treatment-effect heterogeneity, proxy structure, or study design.
+
+All such causal roles are HYPOTHESES supplied as domain prior knowledge.
+They must never be stated as established causal facts.
+
+======================================================================
+TASK CONTEXT
+======================================================================
+
+Dataset:
+{{ dataset_name }}
+
+Domain:
+{{ dataset_domain }}
+
+Population:
+{{ population_description }}
+
+Treatment:
+{{ treatment_name }}
+{{ treatment_description }}
+
+Outcome:
+{{ outcome_name }}
+{{ outcome_description }}
+
+Target estimand:
+{{ estimand_type }}
+
+The interpretation of every feature and concept must be conditional on this task.
+Do not interpret variables only in isolation from the treatment, outcome and population.
+
+----------------------------------------------------------------------
+FULL TASK CONTEXT
+----------------------------------------------------------------------
+
+The following block is authoritative metadata supplied by the researcher.
+
+--- TASK_CONTEXT BEGIN ---
+{{ task_context_yaml }}
+--- TASK_CONTEXT END ---
+
+======================================================================
+OBSERVED FEATURES
+======================================================================
+
+These are the observed pre-treatment features.
+
+These are the variables actually observed by the causal learner.
+
+Do not invent additional observed measurements.
+
+A variable does NOT need to be clinical or biological.
+For example, study-site, administrative, demographic or socioeconomic variables
+must be represented according to their actual meaning.
+
+--- FEATURES BEGIN ---
+{{ features_yaml }}
+--- FEATURES END ---
+
+======================================================================
+OUTPUT CONTRACT
+======================================================================
+
+----------------------------------------------------------------------
+EXPERT-KNOWLEDGE REQUEST
+----------------------------------------------------------------------
+
+The following block defines the required knowledge representation,
+allowed relation types, confidence scale and output contract.
+
+--- REQUEST BEGIN ---
+{{ expert_request_yaml }}
+--- REQUEST END ---
+
+----------------------------------------------------------------------
+SCIENTIFIC CONSTRAINTS
+----------------------------------------------------------------------
+
+Follow these constraints strictly.
+
+1. Use only general knowledge available independently of the patient-level dataset.
+
+2. Do NOT use or infer:
+   - patient-level covariate values;
+   - treatment assignments;
+   - observed outcomes;
+   - counterfactual outcomes;
+   - individual treatment effects;
+   - benchmark response-surface equations;
+   - simulation coefficients;
+   - validation or test results.
+
+3. Do NOT claim that a feature or concept is a proven confounder,
+   mediator or treatment-effect modifier.
+
+   Use language such as:
+   - plausible;
+   - candidate;
+   - possible proxy;
+   - potentially prognostic;
+   - potentially related to treatment assignment;
+   - plausible treatment-effect modifier;
+   - uncertain.
+
+4. Do NOT invent a patient-specific value for any latent or unobserved construct.
+
+   You may propose a latent CONCEPT if observed pre-treatment variables
+   plausibly contain information about it.
+
+   Example of the distinction:
+
+       ACCEPTABLE:
+       "Birth weight, gestational age and neonatal health measures may provide
+       evidence about an underlying construct of neonatal baseline vulnerability."
+
+       NOT ACCEPTABLE:
+       "This patient has high neonatal vulnerability."
+
+5. Do NOT force every feature into a biological or clinical concept.
+
+   Explicitly distinguish:
+   - biological / physiological;
+   - clinical;
+   - developmental;
+   - behavioral;
+   - demographic;
+   - socioeconomic;
+   - family context;
+   - healthcare access;
+   - administrative;
+   - study-design / site;
+   - uncertain or other.
+
+6. Study-design variables must remain study-design variables unless there is
+   a clearly stated reason why they may proxy broader contextual differences.
+
+7. Prefer a SMALL, interpretable ConceptBank over many redundant concepts.
+
+8. Concepts should capture domain knowledge that is not explicit in the raw
+   numerical column representation.
+
+9. A concept should normally be supported by multiple observed features when
+   this is scientifically sensible. Do not create artificial groups merely to
+   satisfy this preference.
+
+10. Preserve uncertainty. If a relation is weak or ambiguous, say so.
+
+----------------------------------------------------------------------
+TASK A - FEATURE CARDS
+----------------------------------------------------------------------
+
+Create exactly one FeatureCard for every observed feature.
+
+For each feature give, in this order:
+
+- feature_id;
+- canonical_name;
+- information_type;
+- expert_summary;
+- candidate_task_roles;
+- candidate_concepts;
+- warnings;
+- embedding_text.
+
+The expert_summary should explain what the variable represents in the current task,
+not merely repeat its raw description.
+
+candidate_task_roles is a list drawn from the feature-level vocabulary:
+- prognostic;
+- treatment_assignment_related;
+- treatment_effect_modification;
+- proxy_for_unobserved_construct;
+- study_design_or_selection;
+- unclear.
+
+Do not assign a role merely to populate the field: when a feature's role is genuinely
+unclear, say unclear rather than guessing. The list must never be empty.
+
+candidate_concepts is a list of concept_id values from your ConceptBank. It MAY be
+empty: not every feature has to belong to a concept.
+
+warnings is a list and may be empty.
+
+----------------------------------------------------------------------
+TASK B - CONCEPT BANK
+----------------------------------------------------------------------
+
+Construct between
+
+{{ concept_min }}
+
+and
+
+{{ concept_max }}
+
+candidate domain concepts, unless the observed variables genuinely justify fewer.
+
+Each concept must correspond to an interpretable domain construct rather than
+an arbitrary statistical grouping.
+
+For every concept provide, in this order:
+
+- concept_id;
+- name;
+- description;
+- information_type;
+- concept_type;
+- temporal_status;
+- task_relevance;
+- feature_relations;
+- expert_confidence;
+- caveats;
+- embedding_text.
+
+information_type and concept_type are two independent axes and both are required.
+information_type says what kind of information the concept draws on, from the same
+vocabulary the features use. concept_type says what kind of construct it is, from
+the separate concept-type vocabulary. For example a concept may be
+
+    information_type: clinical
+    concept_type:     latent_state_or_construct
+
+while a study-site context concept may be
+
+    information_type: study_design
+    concept_type:     study_design_construct
+
+temporal_status must be one of pretreatment, time_invariant_context or unclear.
+Temporal validity is part of the causal safety of this prior, so choose it
+deliberately and use unclear when you are not sure.
+
+task_relevance is a list drawn from the concept-level vocabulary:
+- prognostic;
+- treatment_assignment_related;
+- treatment_effect_modification;
+- study_design_or_selection;
+- unclear.
+
+It must never be empty; use unclear instead. Note that the concept-level vocabulary
+deliberately omits proxy_for_unobserved_construct: being a proxy is a property of an
+observed feature, not of the task relevance of the construct it is a proxy for.
+
+caveats is a list and may be empty.
+
+For every feature-to-concept relation provide:
+
+- feature_id;
+- relation;
+- confidence;
+- rationale;
+- expected_direction when meaningful.
+
+Each concept needs at least one feature relation, and must not list the same
+feature_id twice.
+
+The rationale is important: explain WHY the observed feature provides evidence
+about or relates to the proposed concept.
+
+----------------------------------------------------------------------
+EMBEDDING TEXT
+----------------------------------------------------------------------
+
+Every FeatureCard AND every ConceptCard must carry its own `embedding_text`.
+
+Each one is a short, self-contained natural-language paragraph suitable for
+subsequent embedding by the same frozen language model. These paragraphs are the
+only text that will be embedded. Nothing is assembled from your other fields
+afterwards, so each embedding_text must stand entirely on its own.
+
+For a FeatureCard, the embedding_text should include:
+- what the variable represents in this population and task;
+- what kind of information it is (biological, socioeconomic, study-design, ...);
+- why it might matter here, stated as a possibility rather than a fact.
+
+For a ConceptCard, the embedding_text should include:
+- what the concept means;
+- its relevance in this population/task;
+- which kinds of observed evidence inform it;
+- the nature of those relations.
+
+Do NOT write an embedding_text that consists mainly of:
+- feature IDs;
+- YAML terminology;
+- confidence labels;
+- lists without semantic explanation.
+
+Refer to variables by their meaning, not by bare IDs such as x7. The text should
+remain meaningful if read independently of this YAML document.
+
+----------------------------------------------------------------------
+FINAL QUALITY CHECK
+----------------------------------------------------------------------
+
+Before producing the answer, verify internally that:
+
+- every input feature has exactly one FeatureCard, and no card refers to a
+  feature that is not in the supplied list;
+- every feature referenced by a concept exists in the supplied feature list;
+- every concept_id named in a candidate_concepts list exists in the ConceptBank;
+- every FeatureCard and every ConceptCard has a non-empty embedding_text;
+- no patient-specific information has been invented;
+- no post-treatment information has been introduced;
+- study-design variables have not been misrepresented as biological states;
+- latent concepts have observable pre-treatment evidence;
+- uncertainty is explicitly represented where appropriate;
+- causal hypotheses have not been presented as established causal facts;
+- the ConceptBank is compact and non-redundant.
+
+----------------------------------------------------------------------
+OUTPUT FORMAT
+----------------------------------------------------------------------
+
+Return ONLY valid YAML.
+
+Do not use Markdown fences.
+Do not add explanations before or after the YAML.
+
+The top-level object MUST contain exactly:
+
+schema_version:
+task_summary:
+feature_cards:
+concept_bank:
+global_caveats:
+
+Use the schemas and allowed values supplied in the EXPERT-KNOWLEDGE REQUEST.
+
+Field shapes are fixed by those schemas and are checked mechanically. In
+particular these fields are always YAML sequences, even when they hold a single
+element, and a bare scalar in their place is an error:
+
+    feature_cards, concept_bank, global_caveats,
+    candidate_task_roles, candidate_concepts, warnings,
+    task_relevance, feature_relations, caveats.
+
+Every other field is a plain scalar string. Do not add fields that the schemas do
+not declare, and do not omit a required one.
