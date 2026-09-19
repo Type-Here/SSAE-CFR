@@ -32,7 +32,10 @@ Field notes
   and its zero-initialized final layer never moves. Set them explicitly when deriving
   one variant's config from another's.
 - `model_variant` is the position on the experiment ladder. It is convenience sugar over
-  `use_u_adapter` / `use_w_adapter`; see `_resolve_variant` for how the three interact.
+  `use_u_adapter` / `use_w_adapter` / `use_expert_adapter`; see `_resolve_variant`.
+- The W adapter and the expert-graph adapter fill the same slot (the semantic correction
+  added to `u_shared`) and are mutually exclusive. The expert adapter has no reliability
+  constant: `u_out = u_shared + a_expert`. W stays available as a control arm.
 - `l1_target`: `"u"` (default) is the empirical code the L1 acts on; `"mu"` is its
   deterministic mean.
 
@@ -53,18 +56,23 @@ import yaml
 NOISE_TYPES = ("gaussian", "laplace")
 NOISE_SCALES = ("absolute", "relative")
 MODEL_VARIANTS = (
-    "empirical",    # host only
-    "u_adapter",    # host + U
-    "w_adapter",    # host + W
-    "u_w_adapter",  # host + U + W
+    "empirical",         # host only
+    "u_adapter",         # host + U
+    "w_adapter",         # host + W
+    "u_w_adapter",       # host + U + W
+    "expert_adapter",    # host + expert graph
+    "u_expert_adapter",  # host + U + expert graph
 )
 
-# model_variant -> (use_u_adapter, use_w_adapter)
+# model_variant -> (use_u_adapter, use_w_adapter, use_expert_adapter). W and the expert
+# adapter occupy the same architectural slot, so no variant enables both.
 _VARIANT_BRANCHES = {
-    "empirical": (False, False),
-    "u_adapter": (True, False),
-    "w_adapter": (False, True),
-    "u_w_adapter": (True, True),
+    "empirical": (False, False, False),
+    "u_adapter": (True, False, False),
+    "w_adapter": (False, True, False),
+    "u_w_adapter": (True, True, False),
+    "expert_adapter": (False, False, True),
+    "u_expert_adapter": (True, False, True),
 }
 
 
@@ -81,6 +89,7 @@ class DefaultConfig:
     model_variant: str = "empirical"
     use_u_adapter: Optional[bool] = None
     use_w_adapter: Optional[bool] = None
+    use_expert_adapter: Optional[bool] = None
     # How much of each correction is added to the empirical code. Forced to 0.0 when the
     # corresponding branch is off, by `_resolve_variant`.
     r_U: float = 1.0
@@ -105,6 +114,10 @@ class DefaultConfig:
     # frozen offline one. Adds m * r_W trainable parameters, so an arm using it is not
     # capacity-matched to one that does not.
     w_semantics_trainable: bool = False
+    # Expert-graph adapter. It has no reliability constant: a_expert is added to
+    # u_shared directly.
+    d_edge: int = 16                         # per-edge representation width
+    expert_rho_hidden: Sequence[int] = (32,)  # rho: K*d_edge -> ... -> d_u
 
     # -- prior ranks (independent) ----------------------------------------------
     k_U: Optional[int] = None                # rank of U_k; None => choose_k_svd (auto)
@@ -160,6 +173,7 @@ class DefaultConfig:
         self.u_adapter_hidden = tuple(self.u_adapter_hidden)
         self.phi_hidden = tuple(self.phi_hidden)
         self.rho_hidden = tuple(self.rho_hidden)
+        self.expert_rho_hidden = tuple(self.expert_rho_hidden)
         self.protected = tuple(self.protected)
         self._resolve_variant()
         self.validate()
@@ -179,7 +193,7 @@ class DefaultConfig:
             raise ValueError(
                 f"model_variant must be one of {MODEL_VARIANTS}; got {self.model_variant!r}"
             )
-        implied_u, implied_w = _VARIANT_BRANCHES[self.model_variant]
+        implied_u, implied_w, implied_expert = _VARIANT_BRANCHES[self.model_variant]
 
         if self.use_u_adapter is None:
             self.use_u_adapter = implied_u
@@ -197,6 +211,15 @@ class DefaultConfig:
                 f"model_variant={self.model_variant!r} (implies use_w_adapter={implied_w!r})"
             )
 
+        if self.use_expert_adapter is None:
+            self.use_expert_adapter = implied_expert
+        elif self.use_expert_adapter != implied_expert:
+            raise ValueError(
+                f"use_expert_adapter={self.use_expert_adapter!r} conflicts with "
+                f"model_variant={self.model_variant!r} (implies "
+                f"use_expert_adapter={implied_expert!r})"
+            )
+
         if not self.use_u_adapter:
             self.r_U = 0.0
         if not self.use_w_adapter:
@@ -205,6 +228,12 @@ class DefaultConfig:
     def validate(self) -> None:
         if self.model_variant not in MODEL_VARIANTS:
             raise ValueError(f"model_variant must be one of {MODEL_VARIANTS}; got {self.model_variant!r}")
+        if self.use_w_adapter and self.use_expert_adapter:
+            raise ValueError(
+                "the W adapter and the expert adapter are mutually exclusive in v1: "
+                "they occupy the same architectural slot, so an arm running both would "
+                "not be a control for either"
+            )
         if self.l1_target not in ("u", "mu"):
             raise ValueError(f"l1_target must be 'u' or 'mu'; got {self.l1_target!r}")
         if self.noise_dist not in NOISE_TYPES:

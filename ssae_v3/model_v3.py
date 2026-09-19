@@ -4,10 +4,15 @@
                               |
     U_k^T x_std --> u_adapter --> c -+
                               |      +--> u_shared = u + r_U * c   (MMD acts HERE)
-    (x_ij, q~_j) --> w_adapter --> a_W               |
-                                                      +--> u_out = u_shared + r_W * a_W
-                                                             |
-                                                             +--> h0 / h1
+                              |                      |
+    one semantic branch, at most one of:             |
+      (x_ij, q~_j)     --> w_adapter      --> a_W    +--> u_out
+      expert graph     --> expert_adapter --> a_expert      |
+                                                            +--> h0 / h1
+
+`u_out = u_shared + r_W * a_W` with the W branch, `u_out = u_shared + a_expert` with
+the expert branch. The two fill the same architectural slot and are mutually
+exclusive; the expert branch carries no reliability constant.
 
 The encoder in `core.Empirical` always sees the full standardized `x`; there is no
 gate deciding what reaches it and no penalty preferring one information source over
@@ -30,7 +35,13 @@ from .core import Empirical, OutcomeHeads, to_outcome_scale
 from .hparams import DefaultConfig
 from .losses import factual_loss, mmd_rbf, sparse_loss
 from .losses.total import total_loss as _total_loss
-from .prior_modules import FixedReliability, UStructuralAdapter, WSemanticAdapter
+from .prior_modules import (
+    ExpertPriorAdapter,
+    ExpertPriorBundle,
+    FixedReliability,
+    UStructuralAdapter,
+    WSemanticAdapter,
+)
 
 ArrayLike = Union[Tensor, np.ndarray]
 
@@ -55,7 +66,7 @@ def _mean_scalar(a: ArrayLike) -> float:
 
 
 class SSAECFRv3(nn.Module):
-    """Empirical host + optional U (structural) and W (semantic) corrections."""
+    """Empirical host + an optional U correction and at most one semantic correction."""
 
     def __init__(
         self,
@@ -65,8 +76,15 @@ class SSAECFRv3(nn.Module):
         y_scale: float = 1.0,
         U_k: Optional[Tensor] = None,
         q_tilde: Optional[Tensor] = None,
+        expert_bundle: Optional[ExpertPriorBundle] = None,
     ) -> None:
         super().__init__()
+        if cfg.use_w_adapter and cfg.use_expert_adapter:
+            raise ValueError(
+                "the W adapter and the expert adapter are mutually exclusive in v1: "
+                "they occupy the same architectural slot, so an arm running both would "
+                "not be a control for either"
+            )
         if outcome_type not in ("continuous", "binary"):
             raise ValueError(f"outcome_type must be 'continuous' or 'binary'; got {outcome_type!r}")
         if y_scale <= 0.0:
@@ -92,6 +110,7 @@ class SSAECFRv3(nn.Module):
 
         self.u_adapter = self._build_u_adapter(cfg, m, U_k)
         self.w_adapter = self._build_w_adapter(cfg, m, q_tilde)
+        self.expert_adapter = self._build_expert_adapter(cfg, m, expert_bundle)
 
     @staticmethod
     def _build_u_adapter(
@@ -134,6 +153,32 @@ class SSAECFRv3(nn.Module):
             cfg.activation, cfg.batchnorm, cfg.w_semantics_trainable,
         )
 
+    @staticmethod
+    def _build_expert_adapter(
+        cfg: DefaultConfig, m: int, bundle: Optional[ExpertPriorBundle]
+    ) -> Optional[ExpertPriorAdapter]:
+        if not cfg.use_expert_adapter:
+            return None
+        if bundle is None:
+            raise ValueError(
+                f"model_variant={cfg.model_variant!r} requires the expert branch "
+                "(expert_bundle) but no bundle was given; a silently-ignored flag "
+                "would make this run indistinguishable from the empirical variant"
+            )
+        if bundle.m != m:
+            raise ValueError(
+                f"expert bundle covers {bundle.m} features but cfg.in_channels={m}"
+            )
+        return ExpertPriorAdapter(
+            bundle.relation_mask,
+            bundle.relation_type_index,
+            bundle.n_relation_types,
+            cfg.d_u,
+            cfg.d_edge,
+            cfg.expert_rho_hidden,
+            cfg.activation,
+        )
+
     def forward(self, x: Tensor, t: Tensor, omega: float = 0.0) -> Dict[str, Tensor]:
         mu, u, x_hat = self.empirical(x, omega)
         #r_U, r_W = self.reliability(x)
@@ -148,11 +193,18 @@ class SSAECFRv3(nn.Module):
             c = torch.zeros_like(u)
             u_shared = u
 
+        # At most one semantic branch; both absent leaves u_out as the same tensor
+        # object as u_shared, not u_shared plus a zero tensor.
+        a_W = torch.zeros_like(u)
+        a_expert = torch.zeros_like(u)
+        expert_diag: Dict[str, object] = {}
         if self.w_adapter is not None:
             a_W = self.w_adapter(x)
             u_out = u_shared + r_W * a_W
+        elif self.expert_adapter is not None:
+            a_expert, expert_diag = self.expert_adapter(x)
+            u_out = u_shared + a_expert
         else:
-            a_W = torch.zeros_like(u)
             u_out = u_shared
 
         y0_hat, y1_hat = self.heads(u_out)
@@ -170,6 +222,8 @@ class SSAECFRv3(nn.Module):
             "u_out": u_out,
             "c": c,
             "a_W": a_W,
+            "a_expert": a_expert,
+            "expert_diag": expert_diag,
             "r_U": r_U,
             "r_W": r_W,
         }
@@ -217,6 +271,7 @@ class SSAECFRv3(nn.Module):
             "u_out_norm": _mean_norm(out["u_out"]),
             "c_norm": _mean_norm(out["c"]),
             "a_W_norm": _mean_norm(out["a_W"]),
+            "a_expert_norm": _mean_norm(out["a_expert"]),
             "r_U": _mean_scalar(out["r_U"]),
             "r_W": _mean_scalar(out["r_W"]),
         }
@@ -232,6 +287,7 @@ class SSAECFRv3(nn.Module):
             f"u_out {last.get('u_out_norm', float('nan')):.3f} "
             f"c {last.get('c_norm', float('nan')):.3f} "
             f"a_W {last.get('a_W_norm', float('nan')):.3f} "
+            f"a_expert {last.get('a_expert_norm', float('nan')):.3f} "
             f"r_U {last.get('r_U', float('nan')):.2f} r_W {last.get('r_W', float('nan')):.2f}"
         )
 

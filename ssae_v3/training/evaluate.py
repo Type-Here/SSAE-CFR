@@ -170,7 +170,7 @@ def factual_objective(model: SSAECFRv3, ds: Dataset, normalized: bool = False) -
 _FINAL_DIAGNOSTIC_KEYS = (
     "share_L_fact", "share_L_mmd", "share_L_sparse", "share_L_rec",
     "L_total", "u_norm", "u_shared_norm", "u_out_norm",
-    "c_norm", "a_W_norm", "r_U", "r_W", "omega",
+    "c_norm", "a_W_norm", "a_expert_norm", "r_U", "r_W", "omega",
 )
 
 
