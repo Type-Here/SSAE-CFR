@@ -1,0 +1,269 @@
+schema_version: "1.1"
+request_id: ihdp_expert_prior_v1
+
+role:
+  description: >
+    Act as a domain expert supplying pre-existing scientific and clinical
+    knowledge to a causal representation learner. The learner already has the
+    observed covariates; your task is to describe useful domain structure that
+    is not explicit in the raw column encoding.
+
+inputs:
+  task_context: ihdp_task_context.yaml
+  features: ihdp_features.yaml
+
+objectives:
+  - Build a structured FeatureCard for every observed feature.
+  - Build a compact ConceptBank of clinically, developmental, behavioral,
+    socioeconomic, or study-design constructs that help interpret groups of
+    observed features.
+  - State explicit feature-to-concept relations and why they are plausible.
+  - Distinguish biological/clinical information from demographic,
+    socioeconomic, behavioral, administrative, and study-design information.
+  - Identify possible task relevance without asserting that a variable or
+    concept is a proven confounder or effect modifier.
+
+constraints:
+  use_only_pretreatment_information: true
+  do_not_use_patient_values: true
+  do_not_use_treatment_assignments: true
+  do_not_use_outcomes: true
+  do_not_use_counterfactuals: true
+  do_not_use_benchmark_response_surface: true
+  do_not_claim_causal_identification: true
+  do_not_invent_patient_specific_hidden_states: true
+  do_not_force_every_feature_into_a_latent_clinical_concept: true
+  distinguish_study_design_variables: true
+  preserve_uncertainty: true
+
+concept_bank:
+  target_min_concepts: 4
+  target_max_concepts: 10
+  prefer_compact_interpretable_concepts: true
+  allow_nonclinical_concepts: true
+  allow_study_design_concepts: true
+  require_at_least_two_features_when_possible: true
+
+allowed_information_types:
+  - biological
+  - clinical
+  - developmental
+  - demographic
+  - behavioral
+  - socioeconomic
+  - family_context
+  - healthcare_access
+  - study_design
+  - administrative
+  - other
+
+allowed_feature_concept_relations:
+  - direct_measure
+  - summary_measure
+  - indicator
+  - proxy
+  - determinant_or_driver
+  - contextual_factor
+  - exposure
+  - protective_factor
+  - risk_marker
+  - study_design_indicator
+  - uncertain_relation
+
+# What kind of construct a concept is. Orthogonal to allowed_information_types,
+# which says what kind of information it draws on: a concept is described by one
+# of each. "clinical" + "latent_state_or_construct" and "study_design" +
+# "study_design_construct" are both well formed.
+allowed_concept_types:
+  - latent_state_or_construct
+  - contextual_construct
+  - exposure_construct
+  - study_design_construct
+  - descriptive_grouping
+  - other
+
+# When the construct is valid relative to treatment. Temporal validity is part of
+# the causal safety of the prior, so this is constrained rather than free text.
+allowed_temporal_statuses:
+  - pretreatment
+  - time_invariant_context
+  - unclear
+
+# Feature-level and concept-level task roles are separate vocabularies.
+allowed_feature_task_roles:
+  - prognostic
+  - treatment_assignment_related
+  - treatment_effect_modification
+  - proxy_for_unobserved_construct
+  - study_design_or_selection
+  - unclear
+
+# proxy_for_unobserved_construct is missing on purpose: being a proxy is a
+# property of an observed feature, not of the task relevance of the construct
+# the feature is a proxy for.
+allowed_concept_task_roles:
+  - prognostic
+  - treatment_assignment_related
+  - treatment_effect_modification
+  - study_design_or_selection
+  - unclear
+
+confidence_scale:
+  values: [low, medium, high]
+  instruction: >
+    Confidence refers to confidence in the general domain relation, not to a
+    causal effect in this benchmark.
+
+output:
+  format: yaml
+  markdown_fences: forbidden
+
+  # ---------------------------------------------------------------------------
+  # Type language
+  #
+  # The schemas below are the whole contract. The validator reads them and
+  # checks the response against them; it keeps no second copy of the contract
+  # in code, and it never infers the shape of a field that is declared here.
+  #
+  #   type: string           scalar string, non-empty after stripping
+  #   type: list             YAML sequence; `items` gives the element type
+  #   items: string          every element is a non-empty scalar string
+  #   items: <schema_name>   every element is a mapping checked against that
+  #                          schema named in this file
+  #   enum: <dotted.path>    the value, or every element of a list, must appear
+  #                          in the list found at that path in this file
+  #   references: <target>   every element must resolve against that target
+  #   min_items: n           minimum sequence length; default 0
+  #   required: false        the field may be absent; default true
+  #   unique_key: <field>    that field must be distinct across the sequence
+  #   coverage: {target, key}  exactly one element per member of the target,
+  #                          keyed on that field: no omissions, no duplicates,
+  #                          no elements outside the target
+  #   count_from: <block>    sequence length bounded by target_min_concepts and
+  #                          target_max_concepts of that top-level block
+  #
+  # Reference targets:
+  #   features_file.id       the `id` values of ihdp_features.yaml
+  #   concept_bank.concept_id  the concept_id values emitted in this response
+  #
+  # A field declared `list` must be a YAML sequence even when it carries one
+  # element. A scalar is never promoted to a list and a list is never collapsed
+  # to a scalar. A field not declared in a schema is rejected, not ignored.
+  # ---------------------------------------------------------------------------
+
+  top_level_schema:
+    schema_version:
+      {type: string}
+    task_summary:
+      {type: string}
+    feature_cards:
+      {type: list, items: feature_card_schema,
+       coverage: {target: features_file.id, key: feature_id}}
+    concept_bank:
+      # bounds live once, in the top-level concept_bank block
+      {type: list, items: concept_card_schema,
+       unique_key: concept_id, count_from: concept_bank}
+    global_caveats:
+      {type: list, items: string}
+
+  feature_card_schema:
+    feature_id:
+      {type: string, references: features_file.id}
+    canonical_name:
+      {type: string}
+    information_type:
+      {type: string, enum: allowed_information_types}
+    expert_summary:
+      {type: string}
+    # `unclear` exists for the genuinely unclear case, so an empty list is not
+    # the way to decline to assign a role.
+    candidate_task_roles:
+      {type: list, items: string, enum: allowed_feature_task_roles, min_items: 1}
+    # Empty is legitimate and informative here: constraint
+    # do_not_force_every_feature_into_a_latent_clinical_concept.
+    candidate_concepts:
+      {type: list, items: string, references: concept_bank.concept_id}
+    warnings:
+      {type: list, items: string}
+    embedding_text:
+      {type: string}
+
+  concept_card_schema:
+    concept_id:
+      {type: string}
+    name:
+      {type: string}
+    description:
+      {type: string}
+    # Two orthogonal axes: what kind of information the concept draws on, and
+    # what kind of construct it is.
+    information_type:
+      {type: string, enum: allowed_information_types}
+    concept_type:
+      {type: string, enum: allowed_concept_types}
+    temporal_status:
+      {type: string, enum: allowed_temporal_statuses}
+    task_relevance:
+      {type: list, items: string, enum: allowed_concept_task_roles, min_items: 1}
+    feature_relations:
+      {type: list, items: feature_relation_schema, min_items: 1,
+       unique_key: feature_id}
+    expert_confidence:
+      {type: string, enum: confidence_scale.values}
+    caveats:
+      {type: list, items: string}
+    embedding_text:
+      {type: string}
+
+  feature_relation_schema:
+    feature_id:
+      {type: string, references: features_file.id}
+    relation:
+      {type: string, enum: allowed_feature_concept_relations}
+    confidence:
+      {type: string, enum: confidence_scale.values}
+    rationale:
+      {type: string}
+    expected_direction:
+      {type: string, required: false}
+
+  embedding_text_instruction: >
+    Every FeatureCard and every ConceptCard must carry its own embedding_text:
+    one short self-contained paragraph, written by you, suitable for embedding
+    by the same frozen language model. No embedding_text is ever assembled from
+    the other fields afterwards, so each one must stand on its own. For a
+    feature, say what the variable represents in this task and what kind of
+    information it is. For a concept, define the concept and its relationship
+    to the relevant observed features. In both cases write prose: do not write
+    a text that consists mainly of feature IDs, YAML field names or confidence
+    labels, and do not refer to features by ID alone.
+
+# Advisory thresholds. A violation is reported and recorded, never repaired and
+# never fatal - unlike everything in the schemas above.
+quality_thresholds:
+  severity: warning
+  embedding_text_min_words: 30
+  embedding_text_max_feature_id_fraction: 0.4
+  concept_min_supporting_features: 2
+  # Scanned for as whole words, case-insensitively, over the whole response. A hit
+  # is surfaced for human review as a possible leak of forbidden_information; it is
+  # a prompt-compliance signal, not proof, so it never fails the build.
+  leakage_terms:
+    - mu0
+    - mu1
+    - y_factual
+    - y_cfactual
+    - individual treatment effect
+    - response surface
+    - simulation coefficient
+
+quality_checks:
+  - "Site indicators must not be described as biological patient states."
+  - >
+    A candidate hidden construct is permitted only if observed pre-treatment
+    features plausibly provide evidence about it.
+  - "If evidence is weak or ambiguous, explicitly mark the relation uncertain."
+  - "Do not state that improved prediction would prove deconfounding."
+  - >
+    Do not infer knowledge of the benchmark's simulated outcome-generating
+    coefficients.

@@ -1,0 +1,109 @@
+schema_version: "1.0"
+dataset: ihdp
+
+feature_defaults:
+  timing: pretreatment
+  observed: true
+
+features:
+  - id: x1
+    name: infant_birth_weight
+    description: "The infant's birth weight."
+    data_type: continuous
+  - id: x2
+    name: infant_head_circumference_at_birth
+    description: "The infant's head circumference at birth."
+    data_type: continuous
+  - id: x3
+    name: weeks_born_preterm
+    description: "The number of weeks the infant was born preterm."
+    data_type: continuous
+  - id: x4
+    name: birth_order
+    description: "The infant's birth order among the mother's children."
+    data_type: continuous
+    note: "Represented among the six continuous/numeric benchmark covariates."
+  - id: x5
+    name: neonatal_health_index
+    description: "A summary score of the infant's health at birth."
+    data_type: continuous
+  - id: x6
+    name: maternal_age_at_birth
+    description: "The mother's age at the time of birth."
+    data_type: continuous
+  - id: x7
+    name: infant_sex
+    description: "The infant's sex."
+    data_type: binary
+  - id: x8
+    name: twin_status
+    description: "Whether the infant is a twin."
+    data_type: binary
+  - id: x9
+    name: maternal_marital_status
+    description: "Whether the mother was married at the time of birth."
+    data_type: binary
+  - id: x10
+    name: maternal_education_less_than_high_school
+    description: "Whether the mother's education stopped short of a high school diploma."
+    data_type: binary
+  - id: x11
+    name: maternal_education_high_school_only
+    description: "Whether the mother completed high school as her highest level of education."
+    data_type: binary
+  - id: x12
+    name: maternal_education_some_college
+    description: "Whether the mother attended some college without completing a degree."
+    data_type: binary
+  - id: x13
+    name: maternal_smoking_during_pregnancy
+    description: "Whether the mother smoked cigarettes during pregnancy."
+    data_type: binary
+  - id: x14
+    name: first_born_status
+    description: "Whether the infant is the mother's first-born child."
+    data_type: binary
+  - id: x15
+    name: maternal_alcohol_use_during_pregnancy
+    description: "Whether the mother drank alcohol during pregnancy."
+    data_type: binary
+  - id: x16
+    name: maternal_drug_use_during_pregnancy
+    description: "Whether the mother used drugs during pregnancy."
+    data_type: binary
+  - id: x17
+    name: maternal_employment_during_pregnancy
+    description: "Whether the mother worked during pregnancy."
+    data_type: binary
+  - id: x18
+    name: prenatal_care
+    description: "Whether the mother received prenatal care."
+    data_type: binary
+  - id: x19
+    name: site_little_rock
+    description: "Enrollment at the Little Rock, Arkansas study site."
+    data_type: binary
+  - id: x20
+    name: site_einstein_bronx
+    description: "Enrollment at the Einstein Medical Center study site in the Bronx, New York."
+    data_type: binary
+  - id: x21
+    name: site_harvard_boston
+    description: "Enrollment at the Harvard study site in Boston, Massachusetts."
+    data_type: binary
+  - id: x22
+    name: site_miami
+    description: "Enrollment at the University of Miami study site in Florida."
+    data_type: binary
+  - id: x23
+    name: site_pennsylvania_philadelphia
+    description: "Enrollment at the University of Pennsylvania study site in Philadelphia."
+    data_type: binary
+  - id: x24
+    name: site_texas_dallas
+    description: "Enrollment at the University of Texas study site in Dallas."
+    data_type: binary
+  - id: x25
+    name: site_washington_seattle
+    description: "Enrollment at the University of Washington study site in Seattle."
+    data_type: binary

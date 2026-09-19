@@ -1,0 +1,73 @@
+schema_version: "1.0"
+dataset:
+  id: ihdp
+  name: Infant Health and Development Program (IHDP) semi-synthetic benchmark
+  domain: early_child_development
+  benchmark_type: semi_synthetic_causal_inference
+  n_covariates: 25
+
+population:
+  description: >
+    Low-birth-weight, premature infants enrolled in the Infant Health and
+    Development Program and their mothers.
+  unit_of_analysis: infant
+
+treatment:
+  variable: treatment
+  type: binary
+  name: assignment_to_early_intervention
+  description: >
+    Assignment to the IHDP early developmental intervention arm. In the
+    original program, the intervention included home visits, parent support,
+    an educational program delivered through child-development centers, and
+    pediatric follow-up; the control arm received pediatric follow-up and
+    referral services.
+  timing: after_baseline_covariates
+  note: >
+    For prior construction, interpret treatment at the level of the intervention
+    package. Do not infer or use realization-specific treatment assignments.
+
+outcome:
+  type: continuous
+  name: cognitive_development_outcome
+  description: >
+    Continuous benchmark outcome representing cognitive-development response.
+    The IHDP causal benchmark uses simulated potential outcomes built on real
+    pre-treatment covariates; therefore this is not to be treated as an observed
+    clinical measurement when constructing the prior.
+  timing: post_treatment
+
+estimand:
+  primary: CATE
+  definition: "E[Y(1) - Y(0) | X=x]"
+
+prior_construction_scope:
+  allowed_information:
+    - task_context_in_this_file
+    - feature_metadata_from_features_yaml
+    - general_preexisting_domain_knowledge_of_the_frozen_LLM
+  forbidden_information:
+    - patient_level_covariate_values
+    - treatment_assignments
+    - factual_outcomes
+    - counterfactual_outcomes
+    - true_individual_treatment_effects
+    - mu0_or_mu1
+    - response_surface_formula
+    - simulation_coefficients
+    - realization_specific_statistics
+    - validation_or_test_metrics
+
+causal_constraints:
+  pretreatment_only_for_adjustment: true
+  llm_cannot_certify_causal_identification: true
+  hidden_patient_state_must_not_be_invented: true
+  concept_states_must_later_be_grounded_in_observed_covariates: true
+
+benchmark_notes:
+  - >
+    The standard IHDP benchmark is observationalized from a randomized study by
+    introducing treatment-group selection bias.
+  - >
+    Site indicators are legitimate observed baseline variables but must be
+    distinguished from biological or clinical patient characteristics.
