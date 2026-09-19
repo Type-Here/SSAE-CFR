@@ -11,6 +11,10 @@ be sent, the second re-checks a response already on disk. Iterating on the contr
 the validator therefore costs nothing, in the same spirit as the SVD build's
 `--reuse-V`. Only `generate` and `embed` need weights.
 
+`generate` accepts `--load-in-4bit` for cards too small to hold a 7B model at float16
+alongside this prompt's KV cache; `embed` deliberately does not, because those vectors
+must stay comparable to V. See the module docstring of `generate.py`.
+
 Everything lands in `artifacts/<dataset>/expert_prior/`, a directory of its own. The
 SVD prior's `V.npz`, `P_U.npz` and `prior_bundle.npz` sit beside it and are never read
 or written here, and the versioned `artifacts/manifest.json` is left alone: this
@@ -43,6 +47,8 @@ from .generate import (
     DEFAULT_MODEL,
     generate_expert_prior,
     plan_generation,
+    quantization_record,
+    resolve_device,
 )
 from .inputs import load_inputs
 from .prompt import compose_prompt, load_template, sha256_text
@@ -147,6 +153,7 @@ def generate(
     *,
     dtype: str = "auto",
     device: str = "auto",
+    load_in_4bit: bool = False,
     max_new_tokens: Optional[int] = None,
     min_budget: int = DEFAULT_MIN_BUDGET,
     margin: int = DEFAULT_CONTEXT_MARGIN,
@@ -164,6 +171,9 @@ def generate(
         raise SystemExit(f"no prompt at {prompt_path}; run `compose --dataset {dataset}` first")
     prompt = prompt_path.read_text(encoding="utf-8")
 
+    # decided first: a 4-bit run on a CPU device is refused before anything downloads
+    quantization = quantization_record(load_in_4bit, resolve_device(device), dtype)
+
     plan = plan_generation(
         prompt,
         model,
@@ -175,6 +185,13 @@ def generate(
     print(f"budget: {plan.describe()}")
     for note in plan.notes:
         print(f"NOTE: {note}")
+    if quantization is not None:
+        print(
+            f"NOTE: weights load 4-bit ({quantization['quant_type']}, compute "
+            f"{quantization['compute_dtype']}); the document is written by a quantized "
+            "model and is not expected to match a full-width run token for token. "
+            "Recorded in the manifest."
+        )
     if dry_run:
         print("[dry-run] budget fits; no weights loaded, nothing generated")
         return None
@@ -186,6 +203,7 @@ def generate(
         plan=plan,
         dtype=dtype,
         device=device,
+        load_in_4bit=load_in_4bit,
         do_sample=do_sample,
         temperature=temperature,
         top_p=top_p,
@@ -342,6 +360,8 @@ def run_all(dataset: str, **kwargs: Any) -> None:
         kwargs.pop("model", DEFAULT_MODEL),
         dtype=kwargs.get("dtype", "auto"),
         device=kwargs.get("device", "auto"),
+        # generation only: `embed` below keeps the full width that produced V
+        load_in_4bit=kwargs.get("load_in_4bit", False),
         max_new_tokens=kwargs.get("max_new_tokens"),
         min_budget=kwargs.get("min_budget", DEFAULT_MIN_BUDGET),
         margin=kwargs.get("margin", DEFAULT_CONTEXT_MARGIN),
@@ -385,6 +405,10 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     pg = sub.add_parser("generate", help="the single expert-generation call")
     pg.add_argument("--dataset", required=True)
     _add_model_args(pg)
+    pg.add_argument("--load-in-4bit", action="store_true",
+                    help="load the weights 4-bit (nf4); needs bitsandbytes and a CUDA "
+                         "device. For a 7B model on a 15 GiB card, where float16 weights "
+                         "leave no room for this prompt's KV cache. Generation only")
     pg.add_argument("--max-new-tokens", type=int, default=None,
                     help="default: everything the context leaves after the prompt")
     pg.add_argument("--min-budget", type=int, default=DEFAULT_MIN_BUDGET,
@@ -414,6 +438,9 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     pa = sub.add_parser("all", help="compose, generate, validate and embed in one run")
     pa.add_argument("--dataset", required=True)
     _add_model_args(pa)
+    pa.add_argument("--load-in-4bit", action="store_true",
+                    help="applies to the generation stage only; the embedding stage "
+                         "always runs at full width")
     pa.add_argument("--max-new-tokens", type=int, default=None)
     pa.add_argument("--min-budget", type=int, default=DEFAULT_MIN_BUDGET)
     pa.add_argument("--context-margin", type=int, default=DEFAULT_CONTEXT_MARGIN)
@@ -429,6 +456,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         elif args.cmd == "generate":
             generate(
                 args.dataset, args.model, dtype=args.dtype, device=args.device,
+                load_in_4bit=args.load_in_4bit,
                 max_new_tokens=args.max_new_tokens, min_budget=args.min_budget,
                 margin=args.context_margin, context_limit=args.context_limit,
                 do_sample=args.do_sample, temperature=args.temperature,
@@ -444,6 +472,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         else:
             run_all(
                 args.dataset, model=args.model, dtype=args.dtype, device=args.device,
+                load_in_4bit=args.load_in_4bit,
                 max_new_tokens=args.max_new_tokens, min_budget=args.min_budget,
                 margin=args.context_margin, context_limit=args.context_limit,
                 seed=args.seed, max_length=args.max_length, batch_size=args.batch_size,

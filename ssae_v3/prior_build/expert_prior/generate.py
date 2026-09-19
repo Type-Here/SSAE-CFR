@@ -27,6 +27,25 @@ Placement follows the same recipe as the embedding path: `device_map="auto"` on 
 and no `.to()` afterwards, because `from_pretrained(...).to(device)` materializes the
 whole model in host RAM first and OOMs a host smaller than the model even when the
 GPU had room.
+
+Quantization
+------------
+`device_map="auto"` solves host RAM; it does not create VRAM. A 7B model at float16
+is about 13.5 GiB against a T4's 15 GiB, and this prompt is long enough (roughly 8.5k
+tokens on IHDP) that the KV cache for the prefill alone does not fit in the ~1.5 GiB
+left over. The symptom is a CUDA OOM during generation, or accelerate silently
+spilling layers to CPU and turning minutes into hours. `load_in_4bit` puts the weights
+near 4 GiB, which fits with room for the cache.
+
+It is offered for generation and deliberately not for embedding. The embedding stage
+stays at the width that produced V, because the point of pinning the pooling rule is
+that a later comparison between those vectors and V is about what was written rather
+than how it was produced, and a quantized encoder would reintroduce exactly the
+confound the pin removes. Generation carries no such constraint: the artifact is the
+text the model wrote, and the manifest records the width it was written at, so a
+quantized run reproduces on its own terms and is honestly labelled against an fp16
+one. The two are not expected to be token-identical, and nothing here pretends they
+are.
 """
 
 from __future__ import annotations
@@ -41,12 +60,73 @@ DEFAULT_MODEL = "BioMistral/BioMistral-7B"
 DEFAULT_MIN_BUDGET = 3000
 DEFAULT_CONTEXT_MARGIN = 64
 
+# NF4 with double quantization: the QLoRA defaults, and the only 4-bit setting in wide
+# enough independent use to be treated as a known quantity rather than one more knob.
+# Not exposed, for the same reason the pooling rule is not exposed.
+QUANT_TYPE_4BIT = "nf4"
+DOUBLE_QUANT_4BIT = True
+
 # transformers uses a sentinel this large when a tokenizer declares no limit
 _NO_LIMIT = 1_000_000
 
 
 class GenerationError(RuntimeError):
     """Generation could not be attempted, or did not produce any text."""
+
+
+def resolve_device(device: str) -> str:
+    """Turn "auto" into the device that will really be used.
+
+    Lives here rather than at the call site so the dry run, which reports what a real
+    run would do, cannot disagree with the real run about where it would happen.
+    """
+    if device != "auto":
+        return device
+    try:
+        import torch
+    except ImportError:
+        return "cpu"
+    return "cuda" if torch.cuda.is_available() else "cpu"
+
+
+def resolve_dtype(dtype: str, device: str) -> str:
+    """The width the weights will actually be loaded at.
+
+    Pure and shared, so the dry run reports the same answer the loader will reach
+    rather than a second copy of the rule that can drift from it.
+    """
+    if dtype != "auto":
+        return dtype
+    return "float16" if device.startswith("cuda") else "float32"
+
+
+def quantization_record(
+    load_in_4bit: bool,
+    device: str,
+    dtype: str,
+    *,
+    double_quant: bool = DOUBLE_QUANT_4BIT,
+) -> Optional[Dict[str, Any]]:
+    """Decide 4-bit loading before any weight is read, and describe it for the manifest.
+
+    Returns None when the weights are loaded at full width, so a manifest distinguishes
+    "not quantized" from "quantized and not written down". Kept free of the
+    bitsandbytes import: whether a run is quantized is a fact about the artifact and
+    must be checkable without the library that would perform it.
+    """
+    if not load_in_4bit:
+        return None
+    if not device.startswith("cuda"):
+        raise GenerationError(
+            "4-bit loading needs a CUDA device; bitsandbytes has no CPU 4-bit path. "
+            "Drop --load-in-4bit to generate at full width."
+        )
+    return {
+        "load_in_4bit": True,
+        "quant_type": QUANT_TYPE_4BIT,
+        "compute_dtype": resolve_dtype(dtype, device),
+        "double_quant": bool(double_quant),
+    }
 
 
 @dataclass
@@ -185,18 +265,53 @@ def plan_generation(
     return plan
 
 
-def _load_causal_lm(model_name: str, device: str, dtype: str):
+def _quantization_config(quantization: Dict[str, Any]):
+    """Turn the recorded decision into the transformers object that performs it."""
+    import torch
+
+    try:
+        from transformers import BitsAndBytesConfig
+    except ImportError as exc:  # pragma: no cover - depends on the installed stack
+        raise GenerationError(
+            "4-bit loading needs a transformers build that provides BitsAndBytesConfig"
+        ) from exc
+    try:
+        import bitsandbytes  # noqa: F401
+    except ImportError as exc:
+        raise GenerationError(
+            "4-bit loading needs bitsandbytes, which is not installed. "
+            "Install it (pip install bitsandbytes) or drop --load-in-4bit."
+        ) from exc
+
+    return BitsAndBytesConfig(
+        load_in_4bit=True,
+        bnb_4bit_quant_type=quantization["quant_type"],
+        bnb_4bit_compute_dtype=getattr(torch, quantization["compute_dtype"]),
+        bnb_4bit_use_double_quant=quantization["double_quant"],
+    )
+
+
+def _load_causal_lm(
+    model_name: str,
+    device: str,
+    dtype: str,
+    quantization: Optional[Dict[str, Any]] = None,
+):
     """Load the generation model. Same placement recipe as the embedding path."""
     import torch
     from transformers import AutoModelForCausalLM
 
-    if dtype == "auto":
-        dtype = "float16" if device.startswith("cuda") else "float32"
+    dtype = resolve_dtype(dtype, device)
     torch_dtype = getattr(torch, dtype)
 
     kwargs = {"low_cpu_mem_usage": True}
     if device.startswith("cuda"):
         kwargs["device_map"] = "auto"
+    if quantization is not None:
+        # bitsandbytes places the quantized weights itself; a device_map is required
+        # and `.to()` afterwards is an error rather than a slow path.
+        kwargs["device_map"] = "auto"
+        kwargs["quantization_config"] = _quantization_config(quantization)
 
     try:
         model = AutoModelForCausalLM.from_pretrained(model_name, dtype=torch_dtype, **kwargs)
@@ -219,6 +334,7 @@ def generate_expert_prior(
     plan: Optional[GenerationPlan] = None,
     dtype: str = "auto",
     device: str = "auto",
+    load_in_4bit: bool = False,
     do_sample: bool = False,
     temperature: Optional[float] = None,
     top_p: Optional[float] = None,
@@ -232,14 +348,18 @@ def generate_expert_prior(
     if plan is None:
         plan = plan_generation(prompt, model_name, **plan_kwargs)
 
-    if device == "auto":
-        device = "cuda" if torch.cuda.is_available() else "cpu"
+    device = resolve_device(device)
+
+    # raises before the tokenizer downloads if 4-bit was asked for on a CPU device
+    quantization = quantization_record(load_in_4bit, device, dtype)
 
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    model, input_device, resolved_dtype = _load_causal_lm(model_name, device, dtype)
+    model, input_device, resolved_dtype = _load_causal_lm(
+        model_name, device, dtype, quantization
+    )
     torch.manual_seed(seed)
 
     enc = tokenizer(prompt, return_tensors="pt").to(input_device)
@@ -268,6 +388,7 @@ def generate_expert_prior(
     params = {
         "model_name": model_name,
         "dtype": resolved_dtype,
+        "quantization": quantization,
         "device": str(input_device),
         "seed": seed,
         "do_sample": do_sample,

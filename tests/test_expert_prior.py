@@ -36,6 +36,8 @@ from ssae_v3.prior_build.expert_prior.embed import (
 from ssae_v3.prior_build.expert_prior.generate import (
     GenerationError,
     _context_limit,
+    quantization_record,
+    resolve_dtype,
     size_budget,
 )
 from ssae_v3.prior_build.expert_prior.inputs import InputError, load_inputs, validate_features
@@ -484,6 +486,46 @@ def test_no_declared_context_limit_is_an_error_not_a_guess():
     tokenizer = SimpleNamespace(model_max_length=int(1e30))
     with pytest.raises(GenerationError, match="no usable context limit"):
         _context_limit(config, tokenizer)
+
+
+# -- load width ------------------------------------------------------------
+# Also pure: whether a run was quantized is a fact about the artifact and has to be
+# decidable, and checkable, without the library that would perform the quantization.
+
+
+def test_dtype_auto_follows_the_device():
+    assert resolve_dtype("auto", "cuda:0") == "float16"
+    assert resolve_dtype("auto", "cpu") == "float32"
+
+
+def test_an_explicit_dtype_is_never_overridden():
+    assert resolve_dtype("bfloat16", "cuda:0") == "bfloat16"
+    assert resolve_dtype("float32", "cuda:0") == "float32"
+
+
+def test_full_width_records_no_quantization_rather_than_an_empty_one():
+    # None, not {}: a manifest must distinguish "not quantized" from "quantized and
+    # not written down"
+    assert quantization_record(False, "cuda:0", "auto") is None
+
+
+def test_4bit_records_everything_needed_to_reproduce_it():
+    record = quantization_record(True, "cuda:0", "auto")
+    assert record == {
+        "load_in_4bit": True,
+        "quant_type": "nf4",
+        "compute_dtype": "float16",
+        "double_quant": True,
+    }
+
+
+def test_4bit_compute_dtype_follows_the_requested_width():
+    assert quantization_record(True, "cuda:0", "bfloat16")["compute_dtype"] == "bfloat16"
+
+
+def test_4bit_on_cpu_is_refused_before_anything_is_downloaded():
+    with pytest.raises(GenerationError, match="needs a CUDA device"):
+        quantization_record(True, "cpu", "auto")
 
 
 # -- pooling and persistence -----------------------------------------------
