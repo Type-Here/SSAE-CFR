@@ -24,6 +24,13 @@ class ValueSemanticTokenizer(nn.Module):
     interaction term x_ij * q~_j is required: it is what lets the token depend on the
     covariate's value and its meaning jointly, rather than on a linear rewrite of the
     two stacked separately. One phi is shared across all m features.
+
+    `trainable` turns the frozen semantic table into a learned per-feature embedding,
+    initialized at whatever `q_tilde` was passed in. It is the ablation that asks what
+    the covariate descriptions are worth against a table the outcome loss is free to
+    invent for itself; it is not part of the frozen v3.0 core, where q~ is offline and
+    fixed. It also adds m * r_W trainable parameters, so an arm using it is not
+    capacity-matched to one that does not.
     """
 
     def __init__(
@@ -33,13 +40,19 @@ class ValueSemanticTokenizer(nn.Module):
         hidden: Sequence[int] = (32,),
         activation: str = "relu",
         batchnorm: bool = False,
+        trainable: bool = False,
     ) -> None:
         super().__init__()
         if q_tilde.dim() != 2:
             raise ValueError(f"q_tilde must be 2-D (m, r_W); got shape {tuple(q_tilde.shape)}")
-        # cloned so this buffer never aliases the caller's tensor: `.to()` alone is a
+        # cloned so the table never aliases the caller's tensor: `.to()` alone is a
         # no-op (same storage) when the dtype already matches
-        self.register_buffer("q_tilde", q_tilde.detach().to(dtype=torch.float32).clone())
+        table = q_tilde.detach().to(dtype=torch.float32).clone()
+        self.trainable = bool(trainable)
+        if self.trainable:
+            self.q_tilde = nn.Parameter(table)
+        else:
+            self.register_buffer("q_tilde", table)
         m, r_W = q_tilde.shape
         self.m = m
         self.r_W = r_W
@@ -66,7 +79,7 @@ class WSemanticAdapter(nn.Module):
 
     Pooling is a plain mean over the feature axis, no attention or learned set
     aggregation. The final layer of A_W is zero-initialized (weight and bias), so
-    a_W is exactly zero at init.
+    a_W is exactly zero at init - including when the semantic table itself is learned.
     """
 
     def __init__(
@@ -79,9 +92,12 @@ class WSemanticAdapter(nn.Module):
         rho_hidden: Sequence[int] = (32,),
         activation: str = "relu",
         batchnorm: bool = False,
+        trainable_semantics: bool = False,
     ) -> None:
         super().__init__()
-        self.tokenizer = ValueSemanticTokenizer(q_tilde, d_token, phi_hidden, activation, batchnorm)
+        self.tokenizer = ValueSemanticTokenizer(
+            q_tilde, d_token, phi_hidden, activation, batchnorm, trainable_semantics
+        )
         self.rho = build_mlp(d_token, rho_hidden, d_s, activation, batchnorm)
         self.a_w_head = build_mlp(d_s, [], d_u, activation, batchnorm)
         self._zero_final_layer()
