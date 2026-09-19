@@ -464,3 +464,206 @@ def test_a_control_graph_feeds_a_parameter_matched_adapter():
         other = apply_graph_control(real, control, seed=0)
         count = lambda a: sum(p.numel() for p in a.parameters())
         assert count(make_adapter(other)) == count(make_adapter(real))
+
+
+# ---------------------------------------------------------------- wiring into the model
+
+
+def _model_cfg(**overrides):
+    from ssae_v3.hparams import load_config
+
+    base = dict(
+        in_channels=6,
+        d_u=4,
+        encoder_hidden=(8,),
+        decoder_hidden=(8,),
+        head_hidden=(4,),
+        d_edge=3,
+        expert_rho_hidden=(5,),
+        r_W_rank=3,
+    )
+    base.update(overrides)
+    return load_config(None, **base)
+
+
+def _expert_model(**overrides):
+    from ssae_v3.model_v3 import SSAECFRv3
+
+    cfg = _model_cfg(model_variant="expert_adapter", **overrides)
+    return SSAECFRv3(cfg, expert_bundle=make_bundle()), cfg
+
+
+def _batch(n=8, seed=0):
+    gen = torch.Generator().manual_seed(seed)
+    x = torch.randn(n, 6, generator=gen)
+    t = (torch.rand(n, generator=gen) < 0.5).float()
+    yf = torch.randn(n, generator=gen)
+    return x, t, yf
+
+
+def test_without_an_expert_adapter_u_out_is_u_shared():
+    """Prior-off is the empirical computation, not a numerically-close copy of it."""
+    from ssae_v3.model_v3 import SSAECFRv3
+
+    model = SSAECFRv3(_model_cfg(model_variant="empirical"))
+    assert model.expert_adapter is None
+    x, t, _ = _batch()
+    out = model(x, t)
+    assert out["u_out"] is out["u_shared"]
+    assert torch.equal(out["a_expert"], torch.zeros_like(out["u"]))
+
+
+def test_zero_initialized_expert_adapter_leaves_u_out_equal_to_u_shared():
+    """A live branch is an exact no-op before training, not merely a small one."""
+    torch.manual_seed(0)
+    model, _ = _expert_model()
+    assert model.expert_adapter is not None
+    x, t, _ = _batch()
+    out = model(x, t)
+    assert torch.equal(out["u_out"], out["u_shared"])
+    assert torch.equal(out["a_expert"], torch.zeros_like(out["u"]))
+
+
+def test_expert_adapter_changes_u_out_once_its_parameters_move():
+    """One optimizer step is enough: gradient does reach the zero-initialized head."""
+    torch.manual_seed(0)
+    model, cfg = _expert_model()
+    x, t, yf = _batch()
+
+    before = model(x, t)
+    assert torch.equal(before["u_out"], before["u_shared"])
+
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-2)
+    terms = model.loss_terms(model(x, t), x, t, yf)
+    total, _ = model.total_loss(terms, cfg)
+    optimizer.zero_grad()
+    total.backward()
+    assert model.expert_adapter.head.weight.grad.abs().sum() > 0
+    optimizer.step()
+
+    after = model(x, t)
+    assert not torch.equal(after["u_out"], after["u_shared"])
+    assert after["a_expert"].abs().sum() > 0
+
+
+def test_mmd_receives_u_shared_not_u_out():
+    """Balance acts before the expert correction, whatever the expert branch does."""
+    import ssae_v3.model_v3 as model_v3
+
+    torch.manual_seed(0)
+    model, _ = _expert_model()
+    torch.nn.init.normal_(model.expert_adapter.head.weight)
+    x, t, yf = _batch()
+    out = model(x, t)
+    assert not torch.equal(out["u_out"], out["u_shared"])
+    assert model.balance_representation(out) is out["u_shared"]
+
+    seen = {}
+    original = model_v3.mmd_rbf
+
+    def spy(code, treatment, *args, **kwargs):
+        seen["code"] = code
+        return original(code, treatment, *args, **kwargs)
+
+    model_v3.mmd_rbf = spy
+    try:
+        model.loss_terms(out, x, t, yf)
+    finally:
+        model_v3.mmd_rbf = original
+    assert seen["code"] is out["u_shared"]
+
+
+def test_heads_receive_u_out():
+    torch.manual_seed(0)
+    model, _ = _expert_model()
+    torch.nn.init.normal_(model.expert_adapter.head.weight)
+    x, t, _ = _batch()
+
+    seen = {}
+    handle = model.heads.register_forward_hook(
+        lambda module, args, output: seen.__setitem__("code", args[0])
+    )
+    try:
+        out = model(x, t)
+    finally:
+        handle.remove()
+    assert seen["code"] is out["u_out"]
+    assert not torch.equal(out["u_out"], out["u_shared"])
+
+
+def test_w_and_expert_adapters_cannot_both_be_active():
+    """They fill the same slot, so an arm running both controls for neither."""
+    from ssae_v3.hparams import _VARIANT_BRANCHES, load_config
+    from ssae_v3.model_v3 import SSAECFRv3
+
+    with pytest.raises(ValueError, match="conflicts with"):
+        load_config(None, model_variant="w_adapter", use_expert_adapter=True)
+
+    cfg = _model_cfg(model_variant="w_adapter")
+    cfg.use_expert_adapter = True  # bypass the variant, as a config edit could
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        cfg.validate()
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        SSAECFRv3(cfg, q_tilde=torch.randn(6, 3), expert_bundle=make_bundle())
+
+    # no variant on the ladder can reach the forbidden combination in the first place
+    assert all(not (w and e) for _, w, e in _VARIANT_BRANCHES.values())
+
+
+def test_expert_variant_without_a_bundle_is_refused():
+    """A silently-ignored flag would make the arm indistinguishable from the host."""
+    from ssae_v3.model_v3 import SSAECFRv3
+
+    with pytest.raises(ValueError, match="requires the expert branch"):
+        SSAECFRv3(_model_cfg(model_variant="expert_adapter"))
+
+
+def test_bundle_runs_the_forward_pass_from_the_yaml_alone(tmp_path: Path):
+    """No embedding files present: the graph is the only thing forward() needs."""
+    from ssae_v3.model_v3 import SSAECFRv3
+
+    doc_path = tmp_path / "expert_prior.yaml"
+    doc_path.write_text(yaml.safe_dump(make_document()), encoding="utf-8")
+    request_path = tmp_path / "request.yaml"
+    request_path.write_text(
+        yaml.safe_dump({"allowed_feature_concept_relations": list(VOCABULARY)}), encoding="utf-8"
+    )
+    assert not (tmp_path / "feature_embeddings.pt").exists()
+
+    bundle = load_expert_bundle(FEATURE_IDS, path=doc_path, request_path=request_path)
+    assert bundle.feature_embeddings is None
+
+    model = SSAECFRv3(_model_cfg(model_variant="expert_adapter"), expert_bundle=bundle)
+    x, t, _ = _batch()
+    assert model(x, t)["u_out"].shape == (8, 4)
+
+
+def test_expert_diagnostics_are_named_as_expert_diagnostics():
+    torch.manual_seed(0)
+    model, _ = _expert_model()
+    x, t, _ = _batch()
+    out = model(x, t)
+
+    assert "a_expert" in out and "expert_diag" in out
+    assert set(out["expert_diag"]) == {
+        "a_expert_norm", "concept_repr_norms", "n_active_edges", "edges_per_concept"
+    }
+    assert model.diagnostics(out)["a_expert_norm"] == 0.0
+    assert "a_expert" in model.format_epoch(model.diagnostics(out))
+
+
+def test_u_and_expert_branches_compose():
+    """u_expert_adapter runs both corrections, with the MMD still on u_shared."""
+    from ssae_v3.model_v3 import SSAECFRv3
+
+    torch.manual_seed(0)
+    cfg = _model_cfg(model_variant="u_expert_adapter")
+    u_k, _ = torch.linalg.qr(torch.randn(6, 3))
+    model = SSAECFRv3(cfg, U_k=u_k, expert_bundle=make_bundle())
+    assert model.u_adapter is not None and model.expert_adapter is not None
+    assert model.w_adapter is None
+
+    x, t, _ = _batch()
+    out = model(x, t)
+    assert torch.equal(out["u_shared"], out["u"])   # both corrections zero at init
+    assert torch.equal(out["u_out"], out["u_shared"])

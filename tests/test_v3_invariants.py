@@ -17,6 +17,7 @@ from torch import nn
 from ssae_v3.hparams import MODEL_VARIANTS, load_config
 from ssae_v3.model_v3 import SSAECFRv3
 from ssae_v3.prior_build.projector import build_prior_bundle
+from ssae_v3.prior_modules.expert_bundle import ExpertPriorBundle
 from ssae_v3.prior_modules.w_adapter import ValueSemanticTokenizer, WSemanticAdapter
 from ssae_v3.training.experiments import _arm_config
 
@@ -50,6 +51,45 @@ def _dummy_prior(m: int = M, r_w: int = R_W, seed: int = 0):
     u_k = q
     q_tilde = torch.randn(m, r_w, generator=gen)
     return u_k, q_tilde
+
+
+def _dummy_expert_bundle(m: int = M):
+    """A structurally-valid expert graph: two concepts over the first four features."""
+    feature_ids = tuple(f"x{j}" for j in range(m))
+    vocabulary = ("direct_measure", "indicator")
+    doc = {
+        "feature_cards": [{"feature_id": f} for f in feature_ids],
+        "concept_bank": [
+            {
+                "concept_id": "concept_a",
+                "feature_relations": [
+                    {"feature_id": feature_ids[0], "relation": "direct_measure"},
+                    {"feature_id": feature_ids[1], "relation": "indicator"},
+                ],
+            },
+            {
+                "concept_id": "concept_b",
+                "feature_relations": [
+                    {"feature_id": feature_ids[2], "relation": "indicator"},
+                    {"feature_id": feature_ids[3], "relation": "direct_measure"},
+                ],
+            },
+        ],
+    }
+    return ExpertPriorBundle.from_document(doc, feature_ids, vocabulary)
+
+
+def _prior_kwargs(cfg, m: int = M):
+    """Whatever prior objects `cfg`'s variant requires, and nothing else."""
+    u_k, q_tilde = _dummy_prior(m=m)
+    kwargs = {}
+    if cfg.use_u_adapter:
+        kwargs["U_k"] = u_k
+    if cfg.use_w_adapter:
+        kwargs["q_tilde"] = q_tilde
+    if cfg.use_expert_adapter:
+        kwargs["expert_bundle"] = _dummy_expert_bundle(m)
+    return kwargs
 
 
 def _paired_models():
@@ -114,13 +154,7 @@ def test_zero_reliability_blocks_all_adapter_gradient():
 def test_full_x_reaches_encoder_unfiltered(variant):
     """No masking or filtering happens before the empirical encoder, for every variant."""
     cfg = _cfg(model_variant=variant)
-    u_k, q_tilde = _dummy_prior()
-    kwargs = {}
-    if cfg.use_u_adapter:
-        kwargs["U_k"] = u_k
-    if cfg.use_w_adapter:
-        kwargs["q_tilde"] = q_tilde
-    model = SSAECFRv3(cfg, **kwargs)
+    model = SSAECFRv3(cfg, **_prior_kwargs(cfg))
 
     seen = {}
 
@@ -324,17 +358,11 @@ def test_split_and_standardize_feeds_identical_x_to_every_variant():
     assert np.array_equal(splits_a.standardizer.mean_, splits_b.standardizer.mean_)
     assert np.array_equal(splits_a.standardizer.scale_, splits_b.standardizer.scale_)
 
-    u_k, q_tilde = _dummy_prior(m=m)
     x_tensor = torch.as_tensor(splits_a.train.x, dtype=torch.float32)
     t_tensor = torch.as_tensor(splits_a.train.t, dtype=torch.float32)
     for variant in MODEL_VARIANTS:
         cfg = _cfg(model_variant=variant, in_channels=m)
-        kwargs = {}
-        if cfg.use_u_adapter:
-            kwargs["U_k"] = u_k
-        if cfg.use_w_adapter:
-            kwargs["q_tilde"] = q_tilde
-        model = SSAECFRv3(cfg, **kwargs)
+        model = SSAECFRv3(cfg, **_prior_kwargs(cfg, m))
         model.eval()
 
         seen = {}
