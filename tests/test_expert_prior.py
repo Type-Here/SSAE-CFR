@@ -35,7 +35,9 @@ from ssae_v3.prior_build.expert_prior.embed import (
 )
 from ssae_v3.prior_build.expert_prior.generate import (
     GenerationError,
+    GenerationPlan,
     _context_limit,
+    chat_wrap,
     quantization_record,
     resolve_dtype,
     size_budget,
@@ -526,6 +528,66 @@ def test_4bit_compute_dtype_follows_the_requested_width():
 def test_4bit_on_cpu_is_refused_before_anything_is_downloaded():
     with pytest.raises(GenerationError, match="needs a CUDA device"):
         quantization_record(True, "cpu", "auto")
+
+
+# -- addressing the model --------------------------------------------------
+# The first real run answered with more output-format rules instead of a YAML
+# document: an instruct model handed a long document with no instruction turn
+# continues it. Exercised against a stub, so no weights and no transformers.
+
+
+class _StubTokenizer:
+    """Just enough tokenizer to exercise the wrapping decision."""
+
+    def __init__(self, chat_template=None):
+        self.chat_template = chat_template
+
+    def apply_chat_template(self, messages, tokenize=False, add_generation_prompt=False):
+        assert tokenize is False, "the plan needs the rendered text, not token ids"
+        body = "".join(m["content"] for m in messages)
+        tail = "[/INST]" if add_generation_prompt else ""
+        return f"<s>[INST]{body}{tail}"
+
+
+def test_chat_template_wraps_the_prompt_and_asks_for_a_generation():
+    text, note = chat_wrap("CONTRACT", _StubTokenizer("a template"))
+    assert note is None
+    assert "CONTRACT" in text
+    # without the trailing generation prompt the model has not been handed the turn
+    assert text.endswith("[/INST]")
+
+
+def test_no_chat_template_falls_back_to_raw_and_says_why():
+    text, note = chat_wrap("CONTRACT", _StubTokenizer(None))
+    assert text == "CONTRACT"
+    assert "no chat template" in note
+
+
+def test_chat_template_can_be_declined_for_a_base_model():
+    text, note = chat_wrap("CONTRACT", _StubTokenizer("a template"), False)
+    assert text == "CONTRACT"
+    assert "disabled by request" in note
+
+
+def test_the_plan_records_what_was_actually_fed_to_the_model():
+    plan = GenerationPlan(
+        model_name="m", prompt_tokens=10, context_limit=4096, margin=64,
+        max_new_tokens=3000, context_source="config.max_position_embeddings",
+        chat_template_applied=True, model_input="<s>[INST]CONTRACT[/INST]",
+    )
+    record = plan.as_dict()
+    assert record["chat_template_applied"] is True
+    # the wrapped text is hashed, not stored: the manifest says which string was fed
+    assert record["model_input_sha256"] == sha256_text("<s>[INST]CONTRACT[/INST]")
+    assert "chat template" in plan.describe()
+
+
+def test_a_plan_with_no_model_input_hashes_to_nothing_rather_than_to_an_empty_string():
+    plan = GenerationPlan(
+        model_name="m", prompt_tokens=10, context_limit=4096, margin=64,
+        max_new_tokens=3000, context_source="config.max_position_embeddings",
+    )
+    assert plan.as_dict()["model_input_sha256"] is None
 
 
 # -- pooling and persistence -----------------------------------------------
