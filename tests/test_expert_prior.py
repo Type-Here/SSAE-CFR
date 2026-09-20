@@ -37,6 +37,7 @@ from ssae_v3.prior_build.expert_prior.generate import (
     GenerationError,
     GenerationPlan,
     _context_limit,
+    attention_spike_bytes,
     chat_wrap,
     quantization_record,
     resolve_dtype,
@@ -580,6 +581,25 @@ def test_the_plan_records_what_was_actually_fed_to_the_model():
     # the wrapped text is hashed, not stored: the manifest says which string was fed
     assert record["model_input_sha256"] == sha256_text("<s>[INST]CONTRACT[/INST]")
     assert "chat template" in plan.describe()
+
+
+def test_attention_spike_is_quadratic_in_the_prompt():
+    # the cost that 4-bit weights do not touch: doubling the prompt quadruples it
+    short = attention_spike_bytes(1000, 28)
+    assert attention_spike_bytes(2000, 28) == 4 * short
+
+
+def test_attention_spike_matches_the_measured_t4_failure():
+    # the real run: 6044 tokens, 28 heads. The failed allocation was 976 MiB, which is
+    # exactly one byte per head per token pair - a materialized boolean 4D mask.
+    mask = attention_spike_bytes(6044, 28, 1) / float(2 ** 20)
+    assert 975 < mask < 976
+
+    # and that mask plus two float32 score tensors accounts for the ~8.4 GiB of
+    # transients that separated 5.17 GiB of weights from a 13.61 GiB peak
+    gib = float(2 ** 30)
+    peak = (attention_spike_bytes(6044, 28, 1) + 2 * attention_spike_bytes(6044, 28, 4)) / gib
+    assert 8.4 < peak < 8.7
 
 
 def test_a_plan_with_no_model_input_hashes_to_nothing_rather_than_to_an_empty_string():

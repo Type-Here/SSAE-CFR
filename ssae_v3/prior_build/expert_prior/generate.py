@@ -363,23 +363,6 @@ def attention_spike_bytes(prompt_tokens: int, n_heads: int, dtype_bytes: int = 2
     return int(n_heads) * int(prompt_tokens) ** 2 * int(dtype_bytes)
 
 
-def drop_uninformative_mask(encoding: Any) -> bool:
-    """Remove an all-ones attention mask. Returns whether it was removed.
-
-    For a single unpadded sequence the mask says nothing - every position is real. But
-    handing it over makes transformers build an explicit 4D mask of
-    `heads x T x T` bytes rather than taking the plain causal path, and that tensor is
-    quadratic in the prompt: at T=6044 over 28 heads it is 976 MiB, which is precisely
-    the allocation that ran a T4 out of memory with the weights already comfortably
-    loaded. Dropping it costs nothing and is not an approximation.
-    """
-    mask = encoding.get("attention_mask") if hasattr(encoding, "get") else None
-    if mask is None or not bool(mask.all()):
-        return False
-    del encoding["attention_mask"]
-    return True
-
-
 def _flash_attention_available() -> Optional[bool]:
     """True when the device can use flash attention, None when there is no CUDA device."""
     import torch
@@ -506,7 +489,6 @@ def generate_expert_prior(
         add_special_tokens=not plan.chat_template_applied,
     ).to(input_device)
     prompt_length = int(enc["input_ids"].shape[1])
-    mask_dropped = drop_uninformative_mask(enc)
 
     kwargs: Dict[str, Any] = {
         "max_new_tokens": plan.max_new_tokens,
@@ -524,12 +506,6 @@ def generate_expert_prior(
     # the prefill allocations that quantization cannot help with
     n_heads = getattr(model.config, "num_attention_heads", 0)
     if memory_after_load is not None:
-        avoided = attention_spike_bytes(prompt_length, n_heads, 1) / float(2 ** 30)
-        if mask_dropped:
-            print(
-                f"dropped an all-ones attention mask, avoiding a "
-                f"{avoided:.2f} GiB 4D mask ({prompt_length} tokens x {n_heads} heads)"
-            )
         if _flash_attention_available() is False:
             # float32 accumulation, and scores plus their softmax are live together:
             # the fp16 single-tensor figure understates the peak about fourfold, which
@@ -557,7 +533,6 @@ def generate_expert_prior(
         "dtype": resolved_dtype,
         "quantization": quantization,
         "memory_after_load": memory_after_load,
-        "attention_mask_dropped": mask_dropped,
         "device": str(input_device),
         "seed": seed,
         "do_sample": do_sample,
