@@ -38,6 +38,7 @@ import torch
 from ..core.outcome_scale import to_outcome_scale
 from ..data import (
     Dataset,
+    available,
     load_actg175_pseudo_obs,
     load_actg175_rct,
     load_diur_v1,
@@ -46,6 +47,7 @@ from ..data import (
 )
 from ..hparams import DefaultConfig, load_config
 from ..model_v3 import SSAECFRv3
+from ..prior_modules.expert_bundle import ExpertPriorBundle
 from ..utils.metrics import (
     approximate_risk_ratio,
     approximate_risk_ratio_ci,
@@ -60,13 +62,13 @@ from ..utils.metrics import (
 from ..utils.split import split_and_standardize, treated_fraction
 from .train import fit, prior_for
 
-LOADERS: Dict[str, Callable[[], Dataset]] = {
+LOADERS: Dict[str, Callable[[], Dataset]] = available({
     "ihdp": load_ihdp,
     "aids_v1": load_actg175_rct,
     "aids_v1_biased": load_actg175_pseudo_obs,
     "diur_v1": load_diur_v1,
     "sepsis_v2": load_sepsis_v2,
-}
+})
 
 # Whether a higher outcome is better. IHDP's outcome is a cognitive test score; every
 # other dataset here records a harm (AIDS progression, 28-day mortality), so treating
@@ -308,11 +310,17 @@ def fit_and_score(
     verbose: bool = False,
     control: str = "none",
     control_seed: Optional[int] = None,
+    expert_bundle: Optional[ExpertPriorBundle] = None,
 ) -> Tuple[SSAECFRv3, Dict[str, float]]:
     """Fit one model on already-split, already-standardized data and score every split.
 
     `control` (see `prior_modules.controls`) swaps in a negative-control transform
     of the loaded prior before the model is built; `"none"` uses the real prior.
+
+    `expert_bundle` is the expert feature-to-concept graph, required by the variants
+    that use the expert branch. Its own negative controls transform the graph, so the
+    caller passes an already-controlled bundle rather than naming a control here;
+    `control` above stays the SVD prior's.
 
     Returns the fitted model alongside the scores so a caller can keep probing it.
     """
@@ -338,6 +346,7 @@ def fit_and_score(
         y_scale=y_scale,
         U_k=None if prior is None else prior.U_k,
         q_tilde=None if prior is None else prior.q_tilde,
+        expert_bundle=expert_bundle,
     )
     history = fit(model, train, run_cfg, verbose=verbose, val=val)
 
@@ -375,6 +384,11 @@ def run_once(
     selected on an `out_` key.
     """
     if dataset_name not in LOADERS:
+        if dataset_name in OUTCOME_IS_BENEFIT:
+            raise KeyError(
+                f"dataset {dataset_name!r} is known but its adapter is not in this "
+                f"checkout; available here: {sorted(LOADERS)}"
+            )
         raise KeyError(f"unknown dataset {dataset_name!r}; known: {sorted(LOADERS)}")
 
     torch.manual_seed(seed)

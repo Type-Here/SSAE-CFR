@@ -51,6 +51,7 @@ BUNDLE_NAME = "prior_bundle.npz"
 def _loaders():
     # imported lazily so `emit` does not require every adapter's raw file to be present
     from ..data import (
+        available,
         load_actg175_pseudo_obs,
         load_actg175_rct,
         load_diur_v1,
@@ -58,13 +59,13 @@ def _loaders():
         load_sepsis_v2,
     )
 
-    return {
+    return available({
         "ihdp": load_ihdp,
         "aids_v1": load_actg175_rct,
         "aids_v1_biased": load_actg175_pseudo_obs,
         "diur_v1": load_diur_v1,
         "sepsis_v2": load_sepsis_v2,
-    }
+    })
 
 
 def glosses_path(dataset: str) -> Path:

@@ -244,6 +244,16 @@ def validate(dataset: str, response_path: Optional[Path] = None) -> Path:
     if not response_path.exists():
         raise SystemExit(f"no response at {response_path}; run `generate --dataset {dataset}` first")
 
+    # Whether this document came out of `generate` or from somewhere else is a fact
+    # about the artifact, not a detail of the invocation: an authored or hand-edited
+    # response validates exactly like a generated one, so nothing downstream could
+    # tell them apart unless the manifest says which it was.
+    is_generated = response_path.resolve() == (out / RESPONSE_NAME).resolve()
+    try:
+        source_label = str(response_path.resolve().relative_to(repo_root()))
+    except ValueError:
+        source_label = str(response_path.resolve())
+
     raw = response_path.read_text(encoding="utf-8")
     doc, fence_stripped = parse_response(raw)
     report = validate_expert_prior(
@@ -264,6 +274,8 @@ def validate(dataset: str, response_path: Optional[Path] = None) -> Path:
         "expert_prior_file": EXPERT_PRIOR_NAME,
         "expert_prior_sha256": sha256_text(validated),
         "response_sha256": sha256_text(raw),
+        "response_source": source_label,
+        "response_is_generated": is_generated,
         "fence_stripped": report.fence_stripped,
         "n_feature_cards": report.n_feature_cards,
         "n_concepts": report.n_concepts,
@@ -273,6 +285,13 @@ def validate(dataset: str, response_path: Optional[Path] = None) -> Path:
     })
 
     print(f"valid: {report.n_feature_cards} feature cards, {report.n_concepts} concepts")
+    if not is_generated:
+        print(f"NOTE: validated {source_label}, which this pipeline did not generate.")
+        if _read_manifest(dataset).get("generation"):
+            print(
+                "      The manifest's generation record describes a DIFFERENT document "
+                "and does not apply to this one."
+            )
     if report.fence_stripped:
         print("NOTE: an outer Markdown fence was removed; response_raw.txt is unmodified")
     if report.warnings:

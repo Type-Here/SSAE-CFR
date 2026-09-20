@@ -22,6 +22,8 @@ from ..data.base import Dataset
 from ..data.ihdp import N_REALIZATIONS, has_replication_set, load_ihdp_realization
 from ..hparams import DefaultConfig, MODEL_VARIANTS, load_config
 from ..prior_modules.controls import CONTROLS
+from ..prior_modules.expert_bundle import ExpertPriorBundle, load_expert_bundle
+from ..prior_modules.expert_graph_controls import EXPERT_GRAPH_CONTROLS, apply_graph_control
 from ..utils.split import train_val_test_indices
 from ..utils.standardize import standardize_dataset
 from .evaluate import aggregate, fit_and_score, score_split
@@ -93,6 +95,7 @@ def run_realization(
     verbose: bool = False,
     control: str = "none",
     control_seed: Optional[int] = None,
+    expert_bundle: Optional[ExpertPriorBundle] = None,
 ) -> Dict[str, float]:
     """Fit and score one realization; keys prefixed `in_` / `val_` / `pool_` / `out_`.
 
@@ -119,6 +122,7 @@ def run_realization(
         verbose=verbose,
         control=control,
         control_seed=control_seed,
+        expert_bundle=expert_bundle,
     )
     scores.update({f"pool_{k}": v for k, v in score_split(model, pool_split, True, seed).items()})
     scores["realization"] = float(realization)
@@ -164,6 +168,9 @@ def _arm_label(variant: str, control: str) -> str:
 def _arm_config(base: DefaultConfig, variant: str) -> DefaultConfig:
     """`base` retargeted at one ladder rung, with the enabled branches' reliability live.
 
+    All three branch flags are cleared so the variant alone decides which branches are
+    live: a flag left over from `base` is a conflict, not an override.
+
     A config built for a variant whose branches are off carries `r_U = r_W = 0`, and
     switching the variant does not restore them. Left at zero the correction is
     multiplied by zero, so no gradient ever reaches the adapter and its zero-initialized
@@ -177,6 +184,7 @@ def _arm_config(base: DefaultConfig, variant: str) -> DefaultConfig:
         model_variant=variant,
         use_u_adapter=None,
         use_w_adapter=None,
+        use_expert_adapter=None,
         r_U=base.r_U if base.r_U > 0.0 else 1.0,
         r_W=base.r_W if base.r_W > 0.0 else 1.0,
     )
@@ -482,6 +490,152 @@ def format_w_sweep(
     return "\n".join(lines)
 
 
+# -- the expert-graph sweep -------------------------------------------------
+
+# The expert branch against its two matched graph controls. All three arms share the
+# graph's concept count, edge count, per-concept degree and global relation-type counts,
+# so they are exactly parameter-matched and differ only in which features feed which
+# concept. `permuted` keeps which features are grouped together and gets the groups
+# wrong; `random_matched` destroys the grouping too. Real beating `random_matched` while
+# tying `permuted` would mean the signal is "these features belong together", not "these
+# features belong to this concept".
+EXPERT_GRAPH_ARMS: Tuple[str, ...] = EXPERT_GRAPH_CONTROLS
+
+
+def _expert_arm_config(base: DefaultConfig, variant: str = "expert_adapter") -> DefaultConfig:
+    """`base` retargeted at an expert-branch rung.
+
+    The expert branch carries no reliability constant, so the zeroed-constant failure
+    mode `_arm_config` guards U and W against cannot happen here; the guard against an
+    inert arm is `|a_expert|` in the printed table.
+    """
+    if variant not in ("expert_adapter", "u_expert_adapter"):
+        raise ValueError(
+            f"{variant!r} does not use the expert branch; choose expert_adapter or "
+            "u_expert_adapter"
+        )
+    return _arm_config(base, variant)
+
+
+def run_expert_graph_sweep(
+    realizations: Sequence[int] = tuple(range(1, 31)),
+    arms: Sequence[str] = EXPERT_GRAPH_ARMS,
+    cfg: Optional[DefaultConfig] = None,
+    prior_path: Optional[str] = None,
+    expert_path: Optional[str] = None,
+    val_fraction: float = DEFAULT_VAL_FRACTION,
+    seed: int = 0,
+    verbose: bool = False,
+    variant: str = "expert_adapter",
+    include_empirical: bool = False,
+) -> Tuple[Dict[str, List[Dict[str, float]]], Dict[str, Dict[str, Dict[str, float]]]]:
+    """Run the real expert graph and its matched controls on the same realizations.
+
+    Each realization draws its own control graph (`CONTROL_SEED_BASE + realization`),
+    so a control arm is an ensemble of draws rather than one graph scored N times: the
+    spread between draws was measured to be wider than the effects being reported, and
+    a single draw cannot tell its own luck from its arm's behaviour.
+
+    The real graph is loaded once and controlled per realization, so every arm reads
+    the same artifact and a difference between arms is a difference in the graph alone.
+    """
+    base = cfg if cfg is not None else load_config(str(DEFAULT_CONFIG))
+    for arm in arms:
+        if arm not in EXPERT_GRAPH_CONTROLS:
+            raise ValueError(
+                f"unknown expert graph control {arm!r}; choose from {EXPERT_GRAPH_CONTROLS}"
+            )
+    feature_names = load_ihdp_realization(1, "train").feature_names
+    real = load_expert_bundle(feature_names, dataset=base.dataset, path=expert_path)
+
+    arm_cfg = _expert_arm_config(base, variant)
+    plan: List[Tuple[str, DefaultConfig, Optional[str]]] = []
+    if include_empirical:
+        plan.append(("empirical", _arm_config(base, "empirical"), None))
+    plan.extend((arm, arm_cfg, arm) for arm in arms)
+
+    rows: Dict[str, List[Dict[str, float]]] = {}
+    summaries: Dict[str, Dict[str, Dict[str, float]]] = {}
+    for label, run_cfg, graph_control in plan:
+        runs = []
+        for r in realizations:
+            bundle = (
+                None
+                if graph_control is None
+                else apply_graph_control(real, graph_control, CONTROL_SEED_BASE + r)
+            )
+            runs.append(
+                run_realization(
+                    r, run_cfg, prior_path, val_fraction, seed, verbose,
+                    expert_bundle=bundle,
+                )
+            )
+        rows[label] = runs
+        summaries[label] = aggregate(runs)
+    return rows, summaries
+
+
+def format_expert_sweep(
+    rows: Dict[str, List[Dict[str, float]]],
+    summaries: Dict[str, Dict[str, Dict[str, float]]],
+    reference: str = "real",
+    baseline: Optional[str] = "empirical",
+) -> str:
+    """The expert-graph table: one row per graph, paired against the real graph.
+
+    `vs real` is the only column that separates the expert's assignments from a graph
+    of the same shape, and it is a paired win count rather than a difference of medians
+    because a summary over realizations is decided by a handful of heavy-tailed ones.
+    """
+    n = len(next(iter(rows.values()))) if rows else 0
+    lines = [
+        f"Expert graph sweep - {n} paired realization(s), fixed 672/75 partition",
+        "-" * 94,
+        f"{'graph':<16}{'out PEHE med':>13}{'mean':>8}{'vs host':>9}{'vs real':>9}"
+        f"{'out epsATE':>12}{'SMD red':>9}{'|a_expert|':>12}",
+    ]
+
+    def stat(label: str, key: str, field: str) -> float:
+        entry = summaries[label].get(key)
+        return float("nan") if entry is None else entry[field]
+
+    base_runs = rows.get(baseline) if baseline else None
+    real_runs = rows.get(reference)
+    inert: List[str] = []
+    for label in rows:
+        vs_host = "-"
+        if base_runs is not None and label != baseline:
+            vs_host = _paired_wins(rows[label], base_runs, "out_pehe")
+        vs_real = "-"
+        if real_runs is not None and label not in (baseline, reference):
+            vs_real = _paired_wins(rows[label], real_runs, "out_pehe")
+        lines.append(
+            f"{label:<16}{stat(label, 'out_pehe', 'median'):>13.3f}"
+            f"{stat(label, 'out_pehe', 'mean'):>8.3f}{vs_host:>9}{vs_real:>9}"
+            f"{stat(label, 'out_eps_ate', 'median'):>12.3f}"
+            f"{stat(label, 'pool_smd_reduction', 'median'):>9.3f}"
+            f"{stat(label, 'pool_a_expert_norm', 'median'):>12.3f}"
+        )
+        if label != baseline and stat(label, "pool_a_expert_norm", "median") == 0.0:
+            inert.append(label)
+
+    lines.append("-" * 94)
+    for label in inert:
+        lines.append(
+            f"WARNING {label}: |a_expert| is exactly 0 - this arm trained as the empirical model"
+        )
+    if base_runs is None:
+        lines.append("vs host = not run; every arm here uses the expert branch")
+    else:
+        lines.append(f"vs host = realizations where the arm beats {baseline!r} on out PEHE")
+    lines.append(
+        f"vs real = the same against {reference!r}. The control graphs match the real one on\n"
+        "  concept count, edge count, per-concept degree and global relation-type counts, so\n"
+        "  they are parameter-matched: a tie means the expert's assignments are not the cause."
+    )
+    return "\n".join(lines)
+
+
 # -- the single-variant benchmark table -------------------------------------
 
 
@@ -614,6 +768,27 @@ def main(argv: Optional[List[str]] = None) -> None:
         help="run the four W-semantics arms (real / random / one-hot / learned) instead "
              "of the ladder, paired on the same realizations",
     )
+    parser.add_argument(
+        "--expert-sweep",
+        action="store_true",
+        help="run the expert-graph arms (real / permuted / random_matched) instead of "
+             "the ladder, paired on the same realizations",
+    )
+    parser.add_argument(
+        "--expert-prior",
+        default=None,
+        help="path to an expert_prior.yaml (default: artifacts/<dataset>/expert_prior/)",
+    )
+    parser.add_argument(
+        "--expert-variant",
+        default="expert_adapter",
+        help="which expert rung the sweep runs (expert_adapter or u_expert_adapter)",
+    )
+    parser.add_argument(
+        "--with-empirical",
+        action="store_true",
+        help="also run the empirical host in a sweep, as the 'vs host' reference",
+    )
     parser.add_argument("--val-fraction", type=float, default=DEFAULT_VAL_FRACTION)
     parser.add_argument("--epochs", type=int, default=None)
     parser.add_argument("--seed", type=int, default=0)
@@ -623,6 +798,17 @@ def main(argv: Optional[List[str]] = None) -> None:
     overrides = {} if args.epochs is None else {"epochs": args.epochs}
     cfg = load_config(args.config, **overrides)
     realizations = tuple(range(1, args.realizations + 1))
+
+    if args.expert_sweep:
+        rows, summaries = run_expert_graph_sweep(
+            realizations, EXPERT_GRAPH_ARMS, cfg, args.prior, args.expert_prior,
+            args.val_fraction, args.seed, args.verbose,
+            variant=args.expert_variant, include_empirical=args.with_empirical,
+        )
+        print(format_expert_sweep(
+            rows, summaries, baseline="empirical" if args.with_empirical else None
+        ))
+        return
 
     if args.w_sweep:
         rows, summaries = run_w_semantics_sweep(
