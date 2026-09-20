@@ -154,6 +154,7 @@ def generate(
     dtype: str = "auto",
     device: str = "auto",
     load_in_4bit: bool = False,
+    use_chat_template: bool = True,
     max_new_tokens: Optional[int] = None,
     min_budget: int = DEFAULT_MIN_BUDGET,
     margin: int = DEFAULT_CONTEXT_MARGIN,
@@ -181,6 +182,7 @@ def generate(
         min_budget=min_budget,
         margin=margin,
         context_limit=context_limit,
+        use_chat_template=use_chat_template,
     )
     print(f"budget: {plan.describe()}")
     for note in plan.notes:
@@ -204,6 +206,7 @@ def generate(
         dtype=dtype,
         device=device,
         load_in_4bit=load_in_4bit,
+        use_chat_template=use_chat_template,
         do_sample=do_sample,
         temperature=temperature,
         top_p=top_p,
@@ -362,6 +365,7 @@ def run_all(dataset: str, **kwargs: Any) -> None:
         device=kwargs.get("device", "auto"),
         # generation only: `embed` below keeps the full width that produced V
         load_in_4bit=kwargs.get("load_in_4bit", False),
+        use_chat_template=kwargs.get("use_chat_template", True),
         max_new_tokens=kwargs.get("max_new_tokens"),
         min_budget=kwargs.get("min_budget", DEFAULT_MIN_BUDGET),
         margin=kwargs.get("margin", DEFAULT_CONTEXT_MARGIN),
@@ -409,6 +413,12 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                     help="load the weights 4-bit (nf4); needs bitsandbytes and a CUDA "
                          "device. For a 7B model on a 15 GiB card, where float16 weights "
                          "leave no room for this prompt's KV cache. Generation only")
+    pg.add_argument("--no-chat-template", dest="use_chat_template",
+                    action="store_false",
+                    help="send the prompt raw instead of wrapping it in the model's "
+                         "instruction format. For a base model; an instruct model "
+                         "addressed this way continues the document instead of "
+                         "answering it")
     pg.add_argument("--max-new-tokens", type=int, default=None,
                     help="default: everything the context leaves after the prompt")
     pg.add_argument("--min-budget", type=int, default=DEFAULT_MIN_BUDGET,
@@ -441,6 +451,9 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     pa.add_argument("--load-in-4bit", action="store_true",
                     help="applies to the generation stage only; the embedding stage "
                          "always runs at full width")
+    pa.add_argument("--no-chat-template", dest="use_chat_template",
+                    action="store_false",
+                    help="send the prompt raw; for a base model")
     pa.add_argument("--max-new-tokens", type=int, default=None)
     pa.add_argument("--min-budget", type=int, default=DEFAULT_MIN_BUDGET)
     pa.add_argument("--context-margin", type=int, default=DEFAULT_CONTEXT_MARGIN)
@@ -457,6 +470,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             generate(
                 args.dataset, args.model, dtype=args.dtype, device=args.device,
                 load_in_4bit=args.load_in_4bit,
+                use_chat_template=args.use_chat_template,
                 max_new_tokens=args.max_new_tokens, min_budget=args.min_budget,
                 margin=args.context_margin, context_limit=args.context_limit,
                 do_sample=args.do_sample, temperature=args.temperature,
@@ -473,6 +487,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             run_all(
                 args.dataset, model=args.model, dtype=args.dtype, device=args.device,
                 load_in_4bit=args.load_in_4bit,
+                use_chat_template=args.use_chat_template,
                 max_new_tokens=args.max_new_tokens, min_budget=args.min_budget,
                 margin=args.context_margin, context_limit=args.context_limit,
                 seed=args.seed, max_length=args.max_length, batch_size=args.batch_size,

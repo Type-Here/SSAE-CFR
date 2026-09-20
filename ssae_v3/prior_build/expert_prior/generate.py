@@ -23,6 +23,27 @@ Decoding is greedy by default. A research artifact should re-derive from what th
 manifest records, and greedy decoding is the only setting for which that is true of
 the text as well as the parameters.
 
+Addressing the model
+--------------------
+The composed prompt is the contract and is model-independent: its sha256 must stay
+stable no matter which model reads it. How a given model is *addressed* is not part of
+that contract, so the chat template is applied here rather than in `prompt.py`.
+
+Applying it is not cosmetic. An instruction-tuned model handed a long document with no
+instruction turn does what a base LM does - it continues the document. Measured on the
+first real IHDP run: the prompt ends with a block of output-format rules, and the model
+answered with more rules in the same register ("The embedding_text field is not checked
+for Markdown fences", a sentence that appears nowhere in the prompt and is a perfectly
+formed *next rule*). It was continuing the specification, not obeying it. Wrapping the
+prompt in the model's own template, with a generation prompt at the end, is what turns
+the document into a request.
+
+Two consequences worth stating. The budget is counted on the wrapped text, because
+counting one string and generating from another is how a dry run starts disagreeing
+with the run it describes - so the plan carries the exact text it sized. And a template
+rendered with `tokenize=False` already contains the model's BOS, so the wrapped text is
+tokenized with `add_special_tokens=False`; otherwise the sequence opens with two.
+
 Placement follows the same recipe as the embedding path: `device_map="auto"` on CUDA
 and no `.to()` afterwards, because `from_pretrained(...).to(device)` materializes the
 whole model in host RAM first and OOMs a host smaller than the model even when the
@@ -52,6 +73,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Any, Dict, Optional
+
+from .prompt import sha256_text
 
 DEFAULT_MODEL = "BioMistral/BioMistral-7B"
 
@@ -129,6 +152,30 @@ def quantization_record(
     }
 
 
+def chat_wrap(prompt: str, tokenizer: Any, use_chat_template: bool = True):
+    """Wrap the prompt in the model's own instruction format. Returns (text, note).
+
+    `note` is None when the template was applied and carries the reason otherwise, so
+    the caller can print why a run is about to address an instruct model as if it were
+    a base one. Takes the tokenizer rather than a model name so it can be exercised
+    against a stub.
+    """
+    if not use_chat_template:
+        return prompt, "chat template disabled by request; the prompt is sent raw"
+    if not getattr(tokenizer, "chat_template", None):
+        return prompt, (
+            "the tokenizer declares no chat template, so the prompt is sent raw; an "
+            "instruction-tuned model addressed this way tends to continue the document "
+            "rather than answer it"
+        )
+    text = tokenizer.apply_chat_template(
+        [{"role": "user", "content": prompt}],
+        tokenize=False,
+        add_generation_prompt=True,
+    )
+    return text, None
+
+
 @dataclass
 class GenerationPlan:
     """What will be asked of the model, decided before the weights are loaded."""
@@ -141,10 +188,17 @@ class GenerationPlan:
     context_source: str
     sliding_window: Optional[int] = None
     notes: list = field(default_factory=list)
+    chat_template_applied: bool = False
+    # the exact string that was counted, and that generation must feed back in
+    model_input: Optional[str] = None
 
     def as_dict(self) -> Dict[str, Any]:
         return {
             "prompt_tokens": self.prompt_tokens,
+            "chat_template_applied": self.chat_template_applied,
+            "model_input_sha256": (
+                sha256_text(self.model_input) if self.model_input is not None else None
+            ),
             "context_limit": self.context_limit,
             "context_source": self.context_source,
             "context_margin": self.margin,
@@ -154,9 +208,10 @@ class GenerationPlan:
         }
 
     def describe(self) -> str:
+        addressed = "chat template" if self.chat_template_applied else "raw prompt"
         return (
             f"context {self.context_limit} ({self.context_source}) "
-            f"- prompt {self.prompt_tokens} - margin {self.margin} "
+            f"- prompt {self.prompt_tokens} ({addressed}) - margin {self.margin} "
             f"=> max_new_tokens {self.max_new_tokens}"
         )
 
@@ -226,6 +281,7 @@ def plan_generation(
     min_budget: int = DEFAULT_MIN_BUDGET,
     margin: int = DEFAULT_CONTEXT_MARGIN,
     context_limit: Optional[int] = None,
+    use_chat_template: bool = True,
 ) -> GenerationPlan:
     """Size the generation against the real context window, before loading any weights."""
     from transformers import AutoConfig, AutoTokenizer
@@ -238,7 +294,13 @@ def plan_generation(
     else:
         limit, source = _context_limit(config, tokenizer)
 
-    prompt_tokens = len(tokenizer(prompt, add_special_tokens=True)["input_ids"])
+    model_input, chat_note = chat_wrap(prompt, tokenizer, use_chat_template)
+    chat_applied = chat_note is None
+    # a rendered template already carries the model's BOS; adding another opens the
+    # sequence with two and shifts every position by one
+    prompt_tokens = len(
+        tokenizer(model_input, add_special_tokens=not chat_applied)["input_ids"]
+    )
     allowed = size_budget(
         prompt_tokens,
         limit,
@@ -256,7 +318,11 @@ def plan_generation(
         max_new_tokens=allowed,
         context_source=source,
         sliding_window=getattr(config, "sliding_window", None),
+        chat_template_applied=chat_applied,
+        model_input=model_input,
     )
+    if chat_note is not None:
+        plan.notes.append(chat_note)
     if isinstance(plan.sliding_window, int) and prompt_tokens > plan.sliding_window:
         plan.notes.append(
             f"prompt ({prompt_tokens} tokens) is longer than the model's sliding window "
@@ -335,6 +401,7 @@ def generate_expert_prior(
     dtype: str = "auto",
     device: str = "auto",
     load_in_4bit: bool = False,
+    use_chat_template: bool = True,
     do_sample: bool = False,
     temperature: Optional[float] = None,
     top_p: Optional[float] = None,
@@ -346,7 +413,9 @@ def generate_expert_prior(
     from transformers import AutoTokenizer
 
     if plan is None:
-        plan = plan_generation(prompt, model_name, **plan_kwargs)
+        plan = plan_generation(
+            prompt, model_name, use_chat_template=use_chat_template, **plan_kwargs
+        )
 
     device = resolve_device(device)
 
@@ -362,7 +431,14 @@ def generate_expert_prior(
     )
     torch.manual_seed(seed)
 
-    enc = tokenizer(prompt, return_tensors="pt").to(input_device)
+    # the plan carries the exact string it counted, template and all; falling back to
+    # the bare prompt only when a caller supplied a plan built somewhere else
+    model_input = plan.model_input if plan.model_input is not None else prompt
+    enc = tokenizer(
+        model_input,
+        return_tensors="pt",
+        add_special_tokens=not plan.chat_template_applied,
+    ).to(input_device)
     kwargs: Dict[str, Any] = {
         "max_new_tokens": plan.max_new_tokens,
         "do_sample": do_sample,
