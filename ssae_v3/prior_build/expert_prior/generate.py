@@ -331,6 +331,64 @@ def plan_generation(
     return plan
 
 
+def cuda_memory(device: Any) -> Optional[Dict[str, float]]:
+    """What is actually on the card, in GiB. None off CUDA.
+
+    Printed rather than inferred. A 4-bit load that silently did not quantize and a
+    4-bit load crowded out by something else look identical from the outside, and this
+    project has lost enough time to numbers that were never displayed.
+    """
+    import torch
+
+    if not str(device).startswith("cuda"):
+        return None
+    free, total = torch.cuda.mem_get_info()
+    gib = float(2 ** 30)
+    return {
+        "allocated_gib": round(torch.cuda.memory_allocated() / gib, 2),
+        "reserved_gib": round(torch.cuda.memory_reserved() / gib, 2),
+        "free_gib": round(free / gib, 2),
+        "total_gib": round(total / gib, 2),
+    }
+
+
+def attention_spike_bytes(prompt_tokens: int, n_heads: int, dtype_bytes: int = 2) -> int:
+    """Transient bytes one attention matrix costs when flash attention is unavailable.
+
+    Flash attention needs compute capability 8.0; on anything older SDPA falls back to
+    a backend that materializes `heads x T x T`. The cost is quadratic in the prompt
+    and has nothing to do with the weights, so quantizing does not touch it - which is
+    why the same failure survived both a 4-bit load and a smaller model.
+    """
+    return int(n_heads) * int(prompt_tokens) ** 2 * int(dtype_bytes)
+
+
+def drop_uninformative_mask(encoding: Any) -> bool:
+    """Remove an all-ones attention mask. Returns whether it was removed.
+
+    For a single unpadded sequence the mask says nothing - every position is real. But
+    handing it over makes transformers build an explicit 4D mask of
+    `heads x T x T` bytes rather than taking the plain causal path, and that tensor is
+    quadratic in the prompt: at T=6044 over 28 heads it is 976 MiB, which is precisely
+    the allocation that ran a T4 out of memory with the weights already comfortably
+    loaded. Dropping it costs nothing and is not an approximation.
+    """
+    mask = encoding.get("attention_mask") if hasattr(encoding, "get") else None
+    if mask is None or not bool(mask.all()):
+        return False
+    del encoding["attention_mask"]
+    return True
+
+
+def _flash_attention_available() -> Optional[bool]:
+    """True when the device can use flash attention, None when there is no CUDA device."""
+    import torch
+
+    if not torch.cuda.is_available():
+        return None
+    return torch.cuda.get_device_capability()[0] >= 8
+
+
 def _quantization_config(quantization: Dict[str, Any]):
     """Turn the recorded decision into the transformers object that performs it."""
     import torch
@@ -431,6 +489,14 @@ def generate_expert_prior(
     )
     torch.manual_seed(seed)
 
+    # what the weights actually cost, before anything transient is allocated
+    memory_after_load = cuda_memory(input_device)
+    if memory_after_load is not None:
+        print(
+            "VRAM after load: {allocated_gib} GiB allocated, {free_gib} GiB free "
+            "of {total_gib} GiB".format(**memory_after_load)
+        )
+
     # the plan carries the exact string it counted, template and all; falling back to
     # the bare prompt only when a caller supplied a plan built somewhere else
     model_input = plan.model_input if plan.model_input is not None else prompt
@@ -439,6 +505,9 @@ def generate_expert_prior(
         return_tensors="pt",
         add_special_tokens=not plan.chat_template_applied,
     ).to(input_device)
+    prompt_length = int(enc["input_ids"].shape[1])
+    mask_dropped = drop_uninformative_mask(enc)
+
     kwargs: Dict[str, Any] = {
         "max_new_tokens": plan.max_new_tokens,
         "do_sample": do_sample,
@@ -452,11 +521,33 @@ def generate_expert_prior(
         if top_p is not None:
             kwargs["top_p"] = float(top_p)
 
+    # the prefill allocations that quantization cannot help with
+    n_heads = getattr(model.config, "num_attention_heads", 0)
+    if memory_after_load is not None:
+        avoided = attention_spike_bytes(prompt_length, n_heads, 1) / float(2 ** 30)
+        if mask_dropped:
+            print(
+                f"dropped an all-ones attention mask, avoiding a "
+                f"{avoided:.2f} GiB 4D mask ({prompt_length} tokens x {n_heads} heads)"
+            )
+        if _flash_attention_available() is False:
+            # float32 accumulation, and scores plus their softmax are live together:
+            # the fp16 single-tensor figure understates the peak about fourfold, which
+            # was measured the hard way (1.91 GiB advertised, ~8.4 GiB actually used)
+            one = attention_spike_bytes(prompt_length, n_heads, 4) / float(2 ** 30)
+            print(
+                f"NOTE: this GPU predates flash attention, so prefill materializes the "
+                f"attention matrix in float32: about {one:.2f} GiB per tensor and "
+                f"roughly {2 * one:.2f} GiB at peak, against "
+                f"{memory_after_load['free_gib']} GiB free. Quadratic in the prompt "
+                f"and unaffected by 4-bit weights."
+            )
+
     with torch.no_grad():
         out = model.generate(**enc, **kwargs)
 
     # decode only what was generated, so the prompt never contaminates the response
-    new_tokens = out[0][enc["input_ids"].shape[1]:]
+    new_tokens = out[0][prompt_length:]
     raw = tokenizer.decode(new_tokens, skip_special_tokens=True)
     if not raw.strip():
         raise GenerationError("the model returned no text")
@@ -465,6 +556,8 @@ def generate_expert_prior(
         "model_name": model_name,
         "dtype": resolved_dtype,
         "quantization": quantization,
+        "memory_after_load": memory_after_load,
+        "attention_mask_dropped": mask_dropped,
         "device": str(input_device),
         "seed": seed,
         "do_sample": do_sample,
