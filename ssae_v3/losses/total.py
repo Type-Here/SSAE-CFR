@@ -2,7 +2,8 @@
 
     L = L_fact + alpha_mmd * L_mmd + beta_l1 * L_sparse + lambda_rec * L_rec
 
-Every term is on from epoch zero.
+plus `lambda_prior * L_guidance` when the model supplies that term. Every term is on
+from epoch zero.
 
 Shares (weight x value, over the total) are reported alongside the raw weights
 because a nominal weight says nothing when terms have natural magnitudes differing by
@@ -61,6 +62,13 @@ def total_loss(terms: Mapping[str, Tensor], cfg: "DefaultConfig") -> Tuple[Tenso
         + weights["L_sparse"] * terms["L_sparse"]
         + weights["L_rec"] * terms["L_rec"]
     )
+
+    # Present only when the model guides its encoder with a prior subspace. Weighted
+    # here rather than added by the caller so guidance appears in the share breakdown:
+    # a cost that is never displayed gets attributed to whatever changed most recently.
+    if "L_guidance" in terms:
+        weights["L_guidance"] = cfg.lambda_prior
+        total = total + weights["L_guidance"] * terms["L_guidance"]
 
     breakdown = {"L_total": float(total.detach())}
     breakdown.update(weighted_breakdown(terms, weights))

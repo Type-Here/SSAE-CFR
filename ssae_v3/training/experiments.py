@@ -24,6 +24,7 @@ from ..hparams import DefaultConfig, MODEL_VARIANTS, load_config
 from ..prior_modules.controls import CONTROLS
 from ..prior_modules.expert_bundle import ExpertPriorBundle, load_expert_bundle
 from ..prior_modules.expert_graph_controls import EXPERT_GRAPH_CONTROLS, apply_graph_control
+from ..prior_modules.prior_guidance import PriorGuidance
 from ..utils.split import train_val_test_indices
 from ..utils.standardize import standardize_dataset
 from .evaluate import aggregate, fit_and_score, score_split
@@ -96,6 +97,7 @@ def run_realization(
     control: str = "none",
     control_seed: Optional[int] = None,
     expert_bundle: Optional[ExpertPriorBundle] = None,
+    guidance: Optional[PriorGuidance] = None,
 ) -> Dict[str, float]:
     """Fit and score one realization; keys prefixed `in_` / `val_` / `pool_` / `out_`.
 
@@ -104,6 +106,9 @@ def run_realization(
     random draw measured 30 times rather than 30 random draws. That is the right
     default for pairing but it means a single arm cannot separate the control's
     distribution from the particular subspace it drew - vary this to do that.
+
+    `guidance`, when given, is passed straight through to `fit_and_score`, which then
+    builds the prior-guided empirical backbone instead of the adapter model.
     """
     torch.manual_seed(seed)
     np.random.seed(seed)
@@ -123,6 +128,7 @@ def run_realization(
         control=control,
         control_seed=control_seed,
         expert_bundle=expert_bundle,
+        guidance=guidance,
     )
     scores.update({f"pool_{k}": v for k, v in score_split(model, pool_split, True, seed).items()})
     scores["realization"] = float(realization)

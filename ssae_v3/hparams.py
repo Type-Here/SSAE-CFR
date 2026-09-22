@@ -54,6 +54,9 @@ import yaml
 # Defined here rather than in the modules that consume them: `hparams` is the leaf every
 # other package imports, so this is the one direction that cannot produce a cycle.
 NOISE_TYPES = ("gaussian", "laplace")
+# Which fixed prior projectors guide the encoder input. Read by the guidance module
+# as well, the same way core.noise reads the noise vocabularies from here.
+PRIOR_MODES = ("none", "embedding", "graph", "both")
 NOISE_SCALES = ("absolute", "relative")
 MODEL_VARIANTS = (
     "empirical",         # host only
@@ -128,6 +131,16 @@ class DefaultConfig:
     k_min: int = 2
     k_max: Optional[int] = None              # None => m - 1 (never a pass-through)
     embedding_model: str = "BioMistral"      # LLM used for covariate embeddings
+
+    # -- prior guidance (fixed projectors, zero trainable parameters) -------------
+    # `prior_mode` picks which prior subspaces guide the encoder input: the embedding
+    # subspace, the expert-graph subspace, both (their union span), or neither. The two
+    # strengths are fixed for a run - `gamma_prior` scales the input correction,
+    # `lambda_prior` weights the first-layer guidance loss. Guidance and the v3 adapters
+    # are mutually exclusive: an arm running both is a control for neither.
+    prior_mode: str = "none"
+    gamma_prior: float = 0.0
+    lambda_prior: float = 0.0
 
     # -- loss weights -------------------------------------------------------------
     alpha_mmd: float = 1.0
@@ -234,6 +247,20 @@ class DefaultConfig:
                 "they occupy the same architectural slot, so an arm running both would "
                 "not be a control for either"
             )
+        if self.prior_mode not in PRIOR_MODES:
+            raise ValueError(f"prior_mode must be one of {PRIOR_MODES}; got {self.prior_mode!r}")
+        if self.prior_mode != "none" and (
+            self.use_u_adapter or self.use_w_adapter or self.use_expert_adapter
+        ):
+            raise ValueError(
+                f"prior_mode={self.prior_mode!r} guides the encoder input directly and "
+                f"cannot be combined with model_variant={self.model_variant!r}; the "
+                "guided arms all run on the unmodified empirical backbone"
+            )
+        if self.gamma_prior < 0.0:
+            raise ValueError(f"gamma_prior must be >= 0; got {self.gamma_prior}")
+        if self.lambda_prior < 0.0:
+            raise ValueError(f"lambda_prior must be >= 0; got {self.lambda_prior}")
         if self.l1_target not in ("u", "mu"):
             raise ValueError(f"l1_target must be 'u' or 'mu'; got {self.l1_target!r}")
         if self.noise_dist not in NOISE_TYPES:

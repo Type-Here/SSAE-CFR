@@ -30,7 +30,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
-from typing import Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Callable, Dict, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 import torch
@@ -47,7 +47,9 @@ from ..data import (
 )
 from ..hparams import DefaultConfig, load_config
 from ..model_v3 import SSAECFRv3
+from ..model_v4 import SSAECFRv4
 from ..prior_modules.expert_bundle import ExpertPriorBundle
+from ..prior_modules.prior_guidance import PriorGuidance
 from ..utils.metrics import (
     approximate_risk_ratio,
     approximate_risk_ratio_ci,
@@ -173,6 +175,10 @@ _FINAL_DIAGNOSTIC_KEYS = (
     "share_L_fact", "share_L_mmd", "share_L_sparse", "share_L_rec",
     "L_total", "u_norm", "u_shared_norm", "u_out_norm",
     "c_norm", "a_W_norm", "a_expert_norm", "r_U", "r_W", "omega",
+    # Prior-guidance diagnostics (SSAECFRv4 only): absent, and so silently skipped,
+    # on every run that does not use a guided arm.
+    "share_L_guidance", "guidance_loss", "alignment_active", "alignment_U",
+    "alignment_C", "first_layer_effective_norm", "x_prior_norm", "x_guided_delta_ratio",
 )
 
 
@@ -311,7 +317,8 @@ def fit_and_score(
     control: str = "none",
     control_seed: Optional[int] = None,
     expert_bundle: Optional[ExpertPriorBundle] = None,
-) -> Tuple[SSAECFRv3, Dict[str, float]]:
+    guidance: Optional[PriorGuidance] = None,
+) -> Tuple[Union[SSAECFRv3, SSAECFRv4], Dict[str, float]]:
     """Fit one model on already-split, already-standardized data and score every split.
 
     `control` (see `prior_modules.controls`) swaps in a negative-control transform
@@ -322,10 +329,19 @@ def fit_and_score(
     caller passes an already-controlled bundle rather than naming a control here;
     `control` above stays the SVD prior's.
 
+    `guidance` builds an `SSAECFRv4` (the fixed prior-guided empirical backbone)
+    instead of `SSAECFRv3` whenever it is given or `cfg.prior_mode != "none"`, and in
+    that case skips `prior_for` entirely since the guided model has no adapter branch
+    for the prior it would load.
+
     Returns the fitted model alongside the scores so a caller can keep probing it.
     """
     run_cfg = dataclasses.replace(cfg, in_channels=train.m)
-    prior = prior_for(train, run_cfg, prior_path, control=control, control_seed=control_seed)
+
+    use_guidance = guidance is not None or cfg.prior_mode != "none"
+    prior = None
+    if not use_guidance:
+        prior = prior_for(train, run_cfg, prior_path, control=control, control_seed=control_seed)
 
     # The outcome scale is fit on the training split only, exactly like the
     # covariate standardizer - a property of the data the model was shown, not of
@@ -339,15 +355,24 @@ def fit_and_score(
         if not np.isfinite(y_scale) or y_scale <= 0.0:
             y_loc, y_scale = 0.0, 1.0
 
-    model = SSAECFRv3(
-        run_cfg,
-        outcome_type=train.outcome_type,
-        y_loc=y_loc,
-        y_scale=y_scale,
-        U_k=None if prior is None else prior.U_k,
-        q_tilde=None if prior is None else prior.q_tilde,
-        expert_bundle=expert_bundle,
-    )
+    if use_guidance:
+        model: Union[SSAECFRv3, SSAECFRv4] = SSAECFRv4(
+            run_cfg,
+            outcome_type=train.outcome_type,
+            y_loc=y_loc,
+            y_scale=y_scale,
+            guidance=guidance,
+        )
+    else:
+        model = SSAECFRv3(
+            run_cfg,
+            outcome_type=train.outcome_type,
+            y_loc=y_loc,
+            y_scale=y_scale,
+            U_k=None if prior is None else prior.U_k,
+            q_tilde=None if prior is None else prior.q_tilde,
+            expert_bundle=expert_bundle,
+        )
     history = fit(model, train, run_cfg, verbose=verbose, val=val)
 
     scores: Dict[str, float] = {}
