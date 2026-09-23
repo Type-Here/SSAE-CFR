@@ -1,0 +1,49 @@
+# IHDP overrides on top of the SLRConfig defaults (SLR-CFR v0.5.1).
+# IHDP: m=25, 747 units (672/75 shipped partition), continuous outcome, oracle mu0/mu1.
+#
+# Loss weights and the schedule are carried over from the v0.4 operating point, which
+# was selected on the empirical host with val_factual_objective_normalized. They have
+# not been re-selected at this latent width; d_latent moves from 32 to the embedding
+# dimension, so wide_empirical is what says whether that transfer holds.
+model_version: "0.5.1"
+dataset: ihdp
+in_channels: 25
+
+# Full batch: IHDP is small.
+batch_size: null
+
+# d_latent is deliberately absent: it is read from the embedding artifact (d_q).
+encoder_hidden: [64]
+head_hidden: [32]
+
+# Prior. eta_prior is swept, not frozen; this is the value a single run uses.
+# prior_integration is per arm in the sweep: direct_embedding is the 0.5 mechanism,
+# cosine_cross_attention the 0.5.1 one.
+prior_integration: direct_embedding
+embedding_variant: real
+eta_prior: 0.1
+# Fixed at 1.0 for the first 0.5.1 comparison and never selected on PEHE or true CATE.
+attention_temperature: 1.0
+# Rescale each patient's attention prior to the magnitude direct fusion would give it.
+# On, because without it a sharper temperature is also a louder prior (prior/emp ratio
+# 1.19 at tau=1 against 2.09 at tau=0.02 at eta=0.5), and a temperature comparison
+# would be measuring injection strength rather than selectivity.
+attention_norm_match: true
+
+# The 0.5.1 comparison runs on centered embeddings, both mechanisms alike.
+center_embeddings: true
+
+# Carried over from the v0.4 config. alpha_mmd=3.0 is a judgement there, not a
+# selection: the criterion could not separate alpha_mmd 0 from 10.
+alpha_mmd: 3.0
+# The first sweep must include 0 as the reference, since the semantic term is fixed
+# per patient and a strong sparse penalty could be met by cancelling it.
+beta_sparse: 0.0
+
+# Noise off for the first semantic experiment: the comparison is real vs permuted
+# embeddings, and the interface stays in place for a later ablation.
+noise_enabled: false
+
+epochs: 400
+patience: 3
+es_check_every: 5
